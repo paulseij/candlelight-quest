@@ -1,0 +1,11 @@
+{
+  "model": "qwen3.5:9b",
+  "adapter": "current game OllamaProvider via LiteLLM",
+  "seconds": 10.054,
+  "output": {
+    "action_type": "attack",
+    "target": "goblin",
+    "parameters": {},
+    "confidence": 0.95
+  }
+}

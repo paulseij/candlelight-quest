@@ -121,6 +121,7 @@ late_night = "saltmere_guildhall"
 [npcs.properties]
 preferred_gifts = ["spyglass", "healing_potion", "sea_chart"]
 disliked_gifts = ["rations", "torch", "dagger"]
+quest_hook = "Smugglers are undercutting Guild trade routes and someone is protecting them from the inside"
 
 [[npcs.attacks]]
 name = "Concealed Dagger"
@@ -207,6 +208,7 @@ late_night = "storm_point_lighthouse"
 [npcs.properties]
 preferred_gifts = ["lantern", "healing_potion", "spyglass"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "Strange lights appear offshore every night — ships that follow them vanish without a trace"
 
 [[npcs.attacks]]
 name = "Hand Crossbow"

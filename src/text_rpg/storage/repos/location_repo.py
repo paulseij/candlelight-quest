@@ -53,7 +53,7 @@ class LocationRepo:
         updates = ", ".join(f"{k} = excluded.{k}" for k in data)
         sql = (
             f"INSERT INTO locations ({columns}) VALUES ({placeholders}) "
-            f"ON CONFLICT(id) DO UPDATE SET {updates}"
+            f"ON CONFLICT(game_id, id) DO UPDATE SET {updates}"
         )
         with self.db.get_connection() as conn:
             conn.execute(sql, list(data.values()))

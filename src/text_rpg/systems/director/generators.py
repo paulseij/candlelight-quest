@@ -10,6 +10,12 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader
 
 from text_rpg.llm.provider import LLMProvider
+from text_rpg.llm.schemas import (
+    CreativeOutcome,
+    ItemProposal,
+    PlausibilityAssessment,
+    SpellProposal,
+)
 from text_rpg.systems.base import GameContext
 from text_rpg.systems.director.schemas import (
     validate_location,
@@ -71,6 +77,16 @@ def _format_entities(entities: list[dict]) -> str:
     for e in entities:
         if e.get("is_alive", True):
             parts.append(f"- {e['name']}: {e.get('description', 'No description.')[:100]}")
+    return "\n".join(parts) if parts else "None present."
+
+
+def _format_entities_with_ids(entities: list[dict]) -> str:
+    if not entities:
+        return "None present."
+    parts = []
+    for e in entities:
+        if e.get("is_alive", True):
+            parts.append(f"- id={e.get('id', '?')} — {e.get('name', '?')}: {e.get('description', 'No description.')[:80]}")
     return "\n".join(parts) if parts else "None present."
 
 
@@ -154,16 +170,93 @@ def generate_location(
         existing_locations=existing if existing else "None known nearby.",
     )
 
-    raw = llm.generate_structured(prompt, temperature=0.9, max_tokens=512)
-    return validate_location(raw)
+    from text_rpg.llm.errors import LLMMalformedOutputError
+    from text_rpg.llm.schemas import LocationProposal
+    try:
+        raw = llm.generate_structured(prompt, temperature=0.7, max_tokens=1024, schema=LocationProposal, retries=0)
+    except LLMMalformedOutputError:
+        # A short repair attempt avoids repeating the large prompt that caused
+        # the original truncation. The Director has an offline fallback if even
+        # this request fails.
+        compact = (
+            f"Create one outdoor location {direction} of {source_location.get('name', 'this place')}. "
+            f"Region: {source_location.get('region_id', 'unknown')}. "
+            "Return only a short JSON object with name, description (two sentences), "
+            "location_type, atmosphere, and discovery (one physical detail a search reveals). No entities, items, "
+            "exits, rewards or invented quest facts."
+        )
+        raw = llm.generate_structured(compact, temperature=0.6, max_tokens=768, schema=LocationProposal, retries=0)
+    proposal = LocationProposal.model_validate(raw)
+    return validate_location({
+        'name': proposal.name, 'description': proposal.description,
+        'location_type': proposal.location_type,
+        'properties': {'atmosphere': proposal.atmosphere, 'generation_source': 'model',
+                       'discoveries': [{'id': 'site_detail', 'dc': 10, 'description': proposal.discovery}]},
+    })
+
+
+def fallback_location(source_location: dict, direction: str) -> dict:
+    """A connected, searchable wilderness place if generation is unavailable.
+
+    The site claims no creatures, loot, quest progress or unseen world facts.
+    Its stable id and connections are persisted by the Director as usual.
+    """
+    import uuid
+
+    source_name = str(source_location.get('name') or 'the road')[:65]
+    terrain = source_location.get('location_type', 'wilderness')
+    if terrain == 'mountain':
+        feature = 'a shelf of weathered rock'
+        atmosphere = 'Wind sifts grit through the stone and exposes older layers beneath it.'
+    elif terrain in {'coast', 'beach', 'cave'}:
+        feature = 'a narrow stretch of broken ground'
+        atmosphere = 'Salt and damp stone mark the edge of the route.'
+    elif terrain == 'forest':
+        feature = 'a clearing between dense growth'
+        atmosphere = 'The canopy thins enough to show the lay of the land.'
+    else:
+        feature = 'a rise in the rough ground'
+        atmosphere = 'The surface changes underfoot, making old paths easier to trace.'
+    name = f"{direction.title()} Reach beyond {source_name}"[:100]
+    return validate_location({
+        'id': str(uuid.uuid4()), 'name': name, 'location_type': 'wilderness',
+        'description': f"The route {direction} from {source_name} reaches {feature}. {atmosphere} You can return by the way you came or study the ground before moving on.",
+        'connections': [], 'entities': [], 'items': [],
+        'properties': {
+            'generation_source': 'fallback',
+            'atmosphere': atmosphere,
+            'points_of_interest': [feature],
+            'discoveries': [{
+                'id': 'ground_traces', 'dc': 10,
+                'description': f"The ground at {feature} shows where water and repeated passage have worn a firmer route.",
+            }],
+        },
+    })
+
+
+def _candidate_list(candidates: dict | None, key: str) -> str:
+    values = sorted((candidates or {}).get(key, set()))
+    return ", ".join(values) if values else "none known"
+
+
+def _candidate_set(candidates: dict | None, key: str) -> set[str] | None:
+    if candidates is None or key not in candidates:
+        return None
+    return set(candidates[key])
 
 
 def generate_quest(
     llm: LLMProvider,
     context: GameContext,
     npc: dict,
+    candidates: dict | None = None,
 ) -> dict:
-    """Generate a quest from an NPC's motivation. Returns validated quest dict."""
+    """Generate a quest from an NPC's motivation. Returns validated quest dict.
+
+    candidates optionally holds real-id sets ("locations", "npcs",
+    "entity_types", "items") that objectives are constrained to and repaired
+    against — targets matching nothing real are dropped.
+    """
     env = _get_jinja()
     template = env.get_template("director/quest_generation.j2")
 
@@ -178,16 +271,27 @@ def generate_quest(
         character_summary=_format_character(context.character),
         location_summary=_format_location(context.location),
         recent_events_summary=_format_recent_events(context.recent_events),
+        valid_locations=_candidate_list(candidates, "locations"),
+        valid_npcs=_candidate_list(candidates, "npcs"),
+        valid_entity_types=_candidate_list(candidates, "entity_types"),
+        valid_items=_candidate_list(candidates, "items"),
     )
 
-    raw = llm.generate_structured(prompt, temperature=0.8, max_tokens=512)
-    return validate_quest(raw)
+    raw = llm.generate_structured(prompt, temperature=0.8, max_tokens=1024)
+    return validate_quest(
+        raw,
+        valid_locations=_candidate_set(candidates, "locations"),
+        valid_npcs=_candidate_set(candidates, "npcs"),
+        valid_entity_types=_candidate_set(candidates, "entity_types"),
+        valid_items=_candidate_set(candidates, "items"),
+    )
 
 
 def generate_follow_up_quest(
     llm: LLMProvider,
     context: GameContext,
     completed_quest: dict,
+    candidates: dict | None = None,
 ) -> dict:
     """Generate a follow-up quest after completion. Returns validated quest dict."""
     env = _get_jinja()
@@ -203,10 +307,20 @@ def generate_follow_up_quest(
         character_summary=_format_character(context.character),
         location_summary=_format_location(context.location),
         recent_events_summary=_format_recent_events(context.recent_events),
+        valid_locations=_candidate_list(candidates, "locations"),
+        valid_npcs=_candidate_list(candidates, "npcs"),
+        valid_entity_types=_candidate_list(candidates, "entity_types"),
+        valid_items=_candidate_list(candidates, "items"),
     )
 
-    raw = llm.generate_structured(prompt, temperature=0.8, max_tokens=512)
-    data = validate_quest(raw)
+    raw = llm.generate_structured(prompt, temperature=0.8, max_tokens=1024)
+    data = validate_quest(
+        raw,
+        valid_locations=_candidate_set(candidates, "locations"),
+        valid_npcs=_candidate_set(candidates, "npcs"),
+        valid_entity_types=_candidate_set(candidates, "entity_types"),
+        valid_items=_candidate_set(candidates, "items"),
+    )
 
     # Track chain depth
     old_props = safe_props(completed_quest)
@@ -267,8 +381,49 @@ def evaluate_plausibility(
         inventory_summary=_format_inventory(context.inventory),
     )
 
-    raw = llm.generate_structured(prompt, temperature=0.7, max_tokens=512)
+    raw = llm.generate_structured(prompt, temperature=0.7, max_tokens=512,
+                                  schema=PlausibilityAssessment)
     return validate_plausibility(raw)
+
+
+def generate_creative_outcome(
+    llm: LLMProvider,
+    action_description: str,
+    context: GameContext,
+    skill: str,
+    roll_total: int,
+    dc: int,
+    roll_succeeded: bool,
+    available_items: str,
+    effect_menu: str,
+    budget: int,
+) -> dict:
+    """Generate the post-roll outcome of a creative action as typed effects.
+
+    Called AFTER the dice are rolled; the model narrates and proposes effects
+    from a closed menu. Raises LLMUnavailableError / LLMMalformedOutputError.
+    """
+    env = _get_jinja()
+    template = env.get_template("director/creative_outcome.j2")
+
+    prompt = template.render(
+        action_description=action_description,
+        skill=skill,
+        roll_total=roll_total,
+        dc=dc,
+        roll_succeeded=roll_succeeded,
+        margin=roll_total - dc,
+        character_summary=_format_character(context.character),
+        location_summary=_format_location(context.location),
+        entities_summary=_format_entities_with_ids(context.entities),
+        inventory_summary=_format_inventory(context.inventory),
+        available_items=available_items,
+        effect_menu=effect_menu,
+        budget=budget,
+    )
+
+    return llm.generate_structured(prompt, temperature=0.8, max_tokens=768,
+                                   schema=CreativeOutcome)
 
 
 def evaluate_creative_solution(
@@ -393,5 +548,33 @@ def evaluate_spell_invention(
         known_elements=", ".join(sorted(known_elements)) if known_elements else "none",
     )
 
-    raw = llm.generate_structured(prompt, temperature=0.8, max_tokens=512)
+    raw = llm.generate_structured(prompt, temperature=0.8, max_tokens=512,
+                                  schema=SpellProposal)
     return validate_spell_proposal(raw)
+
+
+def evaluate_item_invention(
+    llm: LLMProvider,
+    concept: str,
+    context: GameContext,
+    max_rarity: str,
+    crafting_context: str,
+) -> dict:
+    """Evaluate a player's item invention concept via LLM.
+
+    Returns the ItemProposal dict (schema-enforced). The caller applies the
+    rarity/budget clamps via mechanics.item_invention.validate_item_proposal.
+    """
+    env = _get_jinja()
+    template = env.get_template("director/item_invention.j2")
+
+    prompt = template.render(
+        concept=concept,
+        character_summary=_format_character(context.character),
+        location_summary=_format_location(context.location),
+        max_rarity=max_rarity,
+        crafting_context=crafting_context,
+    )
+
+    return llm.generate_structured(prompt, temperature=0.8, max_tokens=512,
+                                   schema=ItemProposal)

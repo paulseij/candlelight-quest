@@ -24,6 +24,16 @@ _NEGOTIATE_KEYWORDS = (
     "fewer", "lower the", "reduce the",
 )
 
+# Keywords that indicate the player is explicitly asking for a quest/task.
+_QUEST_ASK_KEYWORDS = (
+    "quest", "task", "job", "work for", "help with", "need help",
+    "need anything", "need something", "anything for me",
+    "any tasks", "any jobs", "any work", "something to do",
+    "things to do", "anything to do", "got anything", "have anything",
+    "need me to", "can i help", "how can i help", "what can i do",
+    "hire me", "mission", "assignment", "errand",
+)
+
 # Regex to strip the "talk to ..." command prefix from raw input.
 _TALK_PREFIX = re.compile(
     r"^(?:can\s+i\s+|let\s+me\s+|i\s+want\s+to\s+|i(?:'d|\s+would)\s+like\s+to\s+)?"
@@ -49,24 +59,30 @@ class SocialSystem(GameSystem):
 
     @property
     def handled_action_types(self) -> set[str]:
-        return {"talk"}
+        return {"talk", "accept_quest", "decline_quest"}
 
     def can_handle(self, action: Action, context: GameContext) -> bool:
         return action.action_type.lower() in self.handled_action_types
 
     def resolve(self, action: Action, context: GameContext) -> ActionResult:
+        if action.action_type == "accept_quest":
+            return self._resolve_accept_quest(action, context)
+        if action.action_type == "decline_quest":
+            return self._resolve_decline_quest(action, context)
+
         target_name = (action.target_id or "").lower()
         npc = None
         for e in context.entities:
             if e.get("entity_type") == "npc" and e.get("is_alive", True):
-                if e["name"].lower() == target_name or target_name in e["name"].lower():
+                if e["id"].lower() == target_name or e["name"].lower() == target_name or target_name in e["name"].lower():
                     npc = e
                     break
 
         if not npc:
+            from text_rpg.engine.nearby_people import nearby_people
             return ActionResult(
                 action_id=action.id, success=False,
-                outcome_description=f"There's nobody called '{action.target_id}' to talk to here.",
+                outcome_description=f"There's nobody called '{action.target_id}' to talk to here.\n{nearby_people(context)}",
             )
 
         # Check NPC availability based on time of day
@@ -97,6 +113,24 @@ class SocialSystem(GameSystem):
         relationship = self._get_relationship(npc)
         quest_hook = self._get_quest_hook(npc)
 
+        # Detect if the player is explicitly asking for a quest
+        asking_for_quest = False
+        if not is_greeting and dialogue_content:
+            input_lower = dialogue_content.lower()
+            asking_for_quest = any(kw in input_lower for kw in _QUEST_ASK_KEYWORDS)
+
+        # If player is asking for a quest and NPC has a hook but no active quest, generate one now
+        if asking_for_quest and quest_hook and self._director and self._repos:
+            from text_rpg.systems.director.triggers import should_offer_quest
+            if should_offer_quest(npc, context):
+                try:
+                    quest_event = self._director._try_prepare_quest(npc, context, self._repos)
+                    if quest_event:
+                        # Record the quest event so it exists before dialogue renders
+                        self._record_quest_event(quest_event, context)
+                except Exception as e:
+                    logger.debug(f"Failed to generate quest on ask: {e}")
+
         events = [{
             "event_type": "DIALOGUE",
             "description": f"Spoke with {npc['name']}.",
@@ -108,6 +142,7 @@ class SocialSystem(GameSystem):
                 "npc_dialogue_tags": npc.get("dialogue_tags") or [],
                 "player_input": dialogue_content if not is_greeting else "",
                 "is_greeting": is_greeting,
+                "asking_for_quest": asking_for_quest,
                 "quest_hook": quest_hook,
                 "npc_personality": self._get_personality(npc),
                 "npc_history": npc_history,
@@ -156,21 +191,44 @@ class SocialSystem(GameSystem):
     # -- NPC Memory --
 
     def _get_quest_hook(self, npc: dict) -> str:
-        """Get the NPC's quest hook from properties."""
+        """Get the NPC's quest hook from properties, falling back to TOML data."""
         props = safe_props(npc)
-        return props.get("quest_hook", "")
+        hook = props.get("quest_hook", "")
+        if hook:
+            return hook
+        # Fallback: load from static TOML content (covers existing games
+        # where properties weren't saved to the DB)
+        try:
+            from text_rpg.content.loader import load_all_npcs
+            static_npcs = load_all_npcs()
+            static = static_npcs.get(npc.get("id", ""), {})
+            return static.get("properties", {}).get("quest_hook", "")
+        except Exception:
+            return ""
 
     def _get_npc_history(self, npc: dict, context: GameContext) -> list[str]:
         """Retrieve conversation history with this NPC from RAG."""
-        if not self._director:
+        from text_rpg.storage.memory import MemoryStore
+        from text_rpg.storage.database import Database
+        db = getattr(self._repos.get("save_game"),"db",None) if self._repos else None
+        if not isinstance(db,Database):
             return []
-        try:
-            results = self._director.retriever.retrieve_npc_history(
-                npc["id"], context.game_id, top_k=5
-            )
-            return [r.text for r in results]
-        except Exception:
-            return []
+        history = [f"{row['speaker_id']} said: {row['text']}" for row in MemoryStore(db).conversation(context.game_id,npc['id'])]
+        # Engine-recorded events witnessed by this NPC are stronger evidence
+        # than generated recollection and remain available without embeddings.
+        ledger = self._repos.get('event_ledger') if self._repos else None
+        if ledger:
+            witnessed = []
+            for event in ledger.get_recent(context.game_id, limit=50):
+                details = safe_json(event.get('mechanical_details'), {})
+                saw_event = event.get('target_id') == npc['id'] or npc['id'] in details.get('witness_ids', [])
+                if saw_event and event.get('event_type') in {
+                    'SOCIAL_OFFENSE', 'PERSONAL_ACTION', 'DEATH', 'REVIVAL',
+                    'CREATIVE_ACTION', 'SCENE_CHANGE', 'VANDALISM',
+                }:
+                    witnessed.append(event)
+            history.extend(f"You witnessed: {event['description']}" for event in reversed(witnessed[-5:]))
+        return history
 
     def _get_personality(self, npc: dict) -> str:
         """Get NPC personality from properties."""
@@ -188,25 +246,114 @@ class SocialSystem(GameSystem):
         })
 
     def _get_npc_quests(self, npc: dict, context: GameContext) -> list[str]:
-        """Get active quests from this NPC."""
+        """Get this NPC's quests with objective progress, for dialogue grounding."""
+        from text_rpg.mechanics.quest_progress import is_ready_for_turn_in, objective_progress_text
+
         npc_id = npc.get("id", "")
         quests = []
         for q in (context.active_quests or []):
-            if q.get("quest_giver_id") == npc_id:
-                quests.append(f"{q.get('name', 'Unknown quest')} ({q.get('status', 'active')})")
+            if q.get("quest_giver_id") != npc_id:
+                continue
+            parts = [f"{q.get('name', 'Unknown quest')} ({q.get('status', 'active')})"]
+            for obj in q.get("objectives", []):
+                state = "done" if obj.get("is_complete") else "pending"
+                parts.append(f"{objective_progress_text(obj)} [{state}]")
+            if is_ready_for_turn_in(q):
+                parts.append("READY TO TURN IN — the player has finished the work")
+            quests.append("; ".join(parts))
         return quests
+
+    def _find_available_quest(self, context: GameContext, npc_name: str | None) -> dict | None:
+        """Newest available quest, preferring one whose giver matches npc_name or is present."""
+        ws = self._repos.get("world_state")
+        if not ws:
+            return None
+        available = [q for q in ws.get_all_quests(context.game_id) if q.get("status") == "available"]
+        if not available:
+            return None
+
+        def giver_entity(quest):
+            giver = quest.get("quest_giver_id", "")
+            return next((e for e in context.entities if e.get("id") == giver), None)
+
+        if npc_name:
+            wanted = npc_name.lower()
+            for quest in available:
+                entity = giver_entity(quest)
+                if entity and wanted in entity.get("name", "").lower():
+                    return quest
+        # Only quests whose giver is actually here can be accepted — never
+        # activate an offer from an NPC the player hasn't met.
+        for quest in available:
+            if giver_entity(quest):
+                return quest
+        return None
+
+    def _resolve_accept_quest(self, action: Action, context: GameContext) -> ActionResult:
+        quest = self._find_available_quest(context, action.target_id)
+        if not quest:
+            return ActionResult(
+                action_id=action.id, success=False,
+                outcome_description="There's no quest on offer to accept right now.",
+            )
+        self._repos["world_state"].update_quest_status(quest["id"], context.game_id, "active")
+        return ActionResult(
+            action_id=action.id, success=True,
+            outcome_description=f"You accept the quest: {quest.get('name', '')}.",
+            events=[{
+                "event_type": "QUEST_START",
+                "description": f"Accepted quest: {quest.get('name', '')}.",
+                "actor_id": context.character.get("id"),
+                "mechanical_details": {
+                    "quest_id": quest.get("id", ""),
+                    "quest_name": quest.get("name", ""),
+                },
+            }],
+        )
+
+    def _resolve_decline_quest(self, action: Action, context: GameContext) -> ActionResult:
+        quest = self._find_available_quest(context, action.target_id)
+        if not quest:
+            return ActionResult(
+                action_id=action.id, success=False,
+                outcome_description="There's no quest on offer to decline.",
+            )
+        return ActionResult(
+            action_id=action.id, success=True,
+            outcome_description=(
+                f"You decline the quest: {quest.get('name', '')}. "
+                "The offer remains open should you change your mind."
+            ),
+        )
+
+    def _record_quest_event(self, quest_event: dict, context: GameContext) -> None:
+        """Record a quest generation event to the event ledger."""
+        if not self._repos:
+            return
+        try:
+            import uuid
+            from datetime import datetime, timezone
+            event_dict = {
+                "id": str(uuid.uuid4()),
+                "game_id": context.game_id,
+                "event_type": quest_event.get("event_type", "DIRECTOR_QUEST_AVAILABLE"),
+                "turn_number": context.turn_number,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "actor_id": context.character.get("id"),
+                "target_id": quest_event.get("target_id"),
+                "location_id": quest_event.get("location_id", context.location.get("id")),
+                "description": quest_event.get("description", ""),
+                "mechanical_details": json.dumps(quest_event.get("mechanical_details", {})),
+                "is_canonical": True,
+            }
+            self._repos["event_ledger"].append(event_dict)
+        except Exception as e:
+            logger.debug(f"Failed to record quest event: {e}")
 
     def _record_conversation(self, npc: dict, player_input: str, context: GameContext) -> None:
         """Store a conversation fact about this NPC in RAG."""
-        if not self._director:
-            return
-        try:
-            fact = f"Player said to {npc['name']}: \"{player_input[:200]}\""
-            self._director.indexer.index_npc_fact(
-                context.game_id, npc["id"], npc["name"], fact,
-            )
-        except Exception as e:
-            logger.debug(f"Failed to index conversation: {e}")
+        # The turn renderer records both complete utterances after commit.
+        return
 
     def _update_relationship(self, npc: dict, context: GameContext) -> None:
         """Increment the interaction count in NPC properties."""
@@ -321,17 +468,23 @@ class SocialSystem(GameSystem):
         npc_response = negotiation.get("npc_response", "The NPC considers your words.")
 
         if negotiation.get("accepted", False) and success:
-            # Update quest objectives in DB
-            new_objectives = negotiation.get("modified_objectives", [])
-            if new_objectives and self._repos:
+            # Merge negotiated terms onto the real objectives — negotiation may
+            # only soften counts/descriptions, never rewrite the quest schema.
+            proposed = negotiation.get("modified_objectives", [])
+            if proposed and isinstance(proposed, list) and self._repos:
+                from text_rpg.mechanics.quest_progress import merge_negotiated_objectives
+
                 try:
+                    original = safe_json(target_quest.get("objectives"), [])
+                    merged = merge_negotiated_objectives(original, proposed)
                     self._repos["world_state"].save_quest({
                         **target_quest,
                         "game_id": context.game_id,
-                        "objectives": new_objectives,
+                        "objectives": merged,
                     })
                 except Exception as e:
                     logger.warning(f"Failed to save negotiated quest: {e}")
+                    raise
 
             # Update disposition
             disposition_change = negotiation.get("disposition_change", 0)
@@ -351,6 +504,7 @@ class SocialSystem(GameSystem):
                         "mechanical_details": {
                             "npc_name": npc["name"],
                             "npc_response": npc_response,
+                            "quest_id": target_quest.get("id", ""),
                             "quest_name": target_quest.get("name", ""),
                             "accepted": True,
                             "player_input": action.raw_input,
@@ -376,6 +530,7 @@ class SocialSystem(GameSystem):
                         "mechanical_details": {
                             "npc_name": npc["name"],
                             "npc_response": npc_response,
+                            "quest_id": target_quest.get("id", ""),
                             "quest_name": target_quest.get("name", ""),
                             "accepted": False,
                             "player_input": action.raw_input,

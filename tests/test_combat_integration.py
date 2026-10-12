@@ -97,6 +97,19 @@ class TestCombatDisplayClassAbilities:
         label = CombatDisplay._get_class_ability_label({})
         assert label is None
 
+    def test_enemy_intent_names_attack(self):
+        enemy = {"hp": {"current": 10, "max": 10}, "attacks": [{"name": "Fire Breath"}]}
+        assert CombatDisplay._enemy_intent(enemy, {"ac": 16}) == "Fire Breath against you (AC 16)"
+
+    def test_wounded_enemy_telegraphs_escape(self):
+        enemy = {"hp": {"current": 2, "max": 10}, "attacks": [{"name": "Claw"}]}
+        assert CombatDisplay._enemy_intent(enemy, {"ac": 12}) == "trying to escape"
+
+    def test_enemy_intent_uses_next_attack_index(self):
+        enemy = {"hp": {"current": 10, "max": 10}, "next_attack_index": 1,
+                 "attacks": [{"name": "Claws"}, {"name": "Fire Breath"}]}
+        assert CombatDisplay._enemy_intent(enemy, {"ac": 16}) == "Fire Breath against you (AC 16)"
+
 
 class TestCombatSystemCanHandle:
     """Test CombatSystem claims spell/item actions during active combat."""

@@ -32,9 +32,37 @@ class PostTurnEventHandler:
                 quest_name = details.get("quest_name", "")
                 if quest_name:
                     self.display.show_quest_notification(quest_name, "new")
+            elif event_type == "QUEST_START":
+                quest_name = details.get("quest_name", "")
+                if quest_name:
+                    self.display.show_quest_notification(quest_name, "updated")
+            elif event_type == "QUEST_UPDATE":
+                objective = details.get("objective", "")
+                quest_name = details.get("quest_name", "")
+                if quest_name:
+                    self.display.console.print(
+                        f"\n  [cyan]Objective complete:[/cyan] {objective or event.get('description', '')}"
+                    )
             elif event_type == "QUEST_COMPLETE":
                 quest_name = details.get("quest_name", "A quest")
                 self.display.show_quest_notification(quest_name, "completed")
+                reward_bits = []
+                if details.get("xp"):
+                    reward_bits.append(f"+{details['xp']} XP")
+                if details.get("gold"):
+                    reward_bits.append(f"+{details['gold']} gold")
+                for item in details.get("items", []):
+                    reward_bits.append(item.replace("_", " ").title())
+                if reward_bits:
+                    self.display.console.print(
+                        f"  [green]Rewards: {', '.join(reward_bits)}[/green]"
+                    )
+            elif event_type == "QUEST_FAILED":
+                quest_name = details.get("quest_name", "")
+                if quest_name:
+                    self.display.console.print(
+                        f"\n  [red]Quest failed: {quest_name}[/red]"
+                    )
             elif event_type == "QUEST_NEGOTIATION":
                 if details.get("accepted"):
                     quest_name = details.get("quest_name", "")
@@ -63,11 +91,17 @@ class PostTurnEventHandler:
             if event_type == "DEATH":
                 self._handle_kill_event(event, rep_repo)
             elif event_type == "QUEST_COMPLETE":
-                rep_repo.adjust_faction_rep(self.game_id, "thornfield_guard", 5)
-                rep_repo.adjust_faction_rep(self.game_id, "thornfield_merchants", 3)
+                law_faction, trade_faction = self._get_region_factions()
+                if law_faction:
+                    rep_repo.adjust_faction_rep(self.game_id, law_faction, 5)
+                if trade_faction:
+                    rep_repo.adjust_faction_rep(self.game_id, trade_faction, 3)
             elif event_type == "QUEST_FAILED":
-                rep_repo.adjust_faction_rep(self.game_id, "thornfield_guard", -5)
-                rep_repo.adjust_faction_rep(self.game_id, "thornfield_merchants", -3)
+                law_faction, trade_faction = self._get_region_factions()
+                if law_faction:
+                    rep_repo.adjust_faction_rep(self.game_id, law_faction, -5)
+                if trade_faction:
+                    rep_repo.adjust_faction_rep(self.game_id, trade_faction, -3)
 
     def _handle_kill_event(self, event: dict, rep_repo: Any) -> None:
         """Handle reputation/bounty consequences of killing an entity."""
@@ -78,22 +112,26 @@ class PostTurnEventHandler:
 
         faction_id = entity.get("faction_id")
         is_hostile = entity.get("is_hostile", False)
+        law_faction, _ = self._get_region_factions()
+        region = self._get_current_region()
 
         if is_hostile:
-            rep_repo.adjust_faction_rep(self.game_id, "thornfield_guard", 3)
+            if law_faction:
+                rep_repo.adjust_faction_rep(self.game_id, law_faction, 3)
         elif faction_id:
             rep_repo.adjust_faction_rep(self.game_id, faction_id, -15)
-            region = self._get_current_region()
             npc_name = entity.get("name", "someone")
-            rep_repo.add_bounty(self.game_id, region, 25, f"Murder of {npc_name}")
-            self.display.console.print(
-                f"\n  [red]Your actions have consequences. Bounty added in the region.[/red]"
-            )
+            if region:
+                rep_repo.add_bounty(self.game_id, region, 25, f"Murder of {npc_name}")
+                self.display.console.print(
+                    f"\n  [red]Your actions have consequences. Bounty added in the region.[/red]"
+                )
         else:
-            region = self._get_current_region()
             npc_name = entity.get("name", "someone")
-            rep_repo.add_bounty(self.game_id, region, 15, f"Murder of {npc_name}")
-            rep_repo.adjust_faction_rep(self.game_id, "thornfield_guard", -10)
+            if region:
+                rep_repo.add_bounty(self.game_id, region, 15, f"Murder of {npc_name}")
+            if law_faction:
+                rep_repo.adjust_faction_rep(self.game_id, law_faction, -10)
 
     def _check_guild_events(self, result: Any) -> None:
         """Handle guild-related events: work order completion, rank-up."""
@@ -122,8 +160,45 @@ class PostTurnEventHandler:
                 )
 
     def _get_current_region(self) -> str:
-        """Get the region_id for the player's current location."""
+        """Get the region_id for the player's current location ("" if unknown)."""
         game = self.repos["save_game"].get_game(self.game_id)
         loc_id = game.get("current_location_id", "") if game else ""
         loc = self.repos["location"].get(loc_id, self.game_id) if loc_id else None
-        return loc.get("region_id", "verdant_reach") if loc else "verdant_reach"
+        return loc.get("region_id", "") if loc else ""
+
+    def _get_region_factions(self) -> tuple[str | None, str | None]:
+        """Resolve the (law, trade) faction ids for the player's current region."""
+        region = self._get_current_region()
+        if not region:
+            return None, None
+        try:
+            from text_rpg.content.loader import load_all_factions
+            factions = load_all_factions()
+        except Exception:
+            factions = {}
+
+        region_factions = [
+            fid for fid, data in factions.items() if data.get("region") == region
+        ]
+        # Generated regions have no TOML factions; generated NPCs use this convention.
+        if not region_factions:
+            return f"{region}_guard", f"{region}_merchants"
+
+        law = next(
+            (f for f in region_factions
+             if any(k in f for k in ("guard", "watch", "legion", "warden", "militia", "order"))),
+            None,
+        )
+        trade = next(
+            (f for f in region_factions
+             if f != law and any(k in f for k in ("merchant", "trade", "cooperative", "consortium", "guild", "company"))),
+            None,
+        )
+        # A region always has some civic consequence: fall back to any faction
+        # rather than silently dropping reputation changes.
+        remaining = [f for f in region_factions if f not in (law, trade)]
+        if law is None:
+            law = remaining.pop(0) if remaining else trade
+        if trade is None:
+            trade = remaining.pop(0) if remaining else law
+        return law, trade

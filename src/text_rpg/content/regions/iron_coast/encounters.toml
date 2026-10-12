@@ -249,3 +249,40 @@ name = "Crushing Grip"
 damage_dice = "1d10"
 damage_bonus = 4
 damage_type = "bludgeoning"
+
+[[encounters]]
+id = "smuggler_lookout"
+name = "Returning Smuggler"
+location_ids = ["smuggler_den"]
+encounter_chance = 0.5
+fight_type = "attrition"
+
+[encounters.loot]
+gold_min = 1
+gold_max = 5
+
+[[encounters.entities]]
+id = "smuggler_lookout"
+name = "Smuggler Lookout"
+entity_type = "enemy"
+description = "A salt-stained lookout slips through the waterfall with a lantern and draws a short blade on seeing an intruder."
+level = 1
+hp_max = 7
+ac = 11
+count_min = 1
+count_max = 1
+xp_value = 25
+
+[encounters.entities.ability_scores]
+strength = 10
+dexterity = 12
+constitution = 10
+intelligence = 10
+wisdom = 10
+charisma = 10
+
+[[encounters.entities.attacks]]
+name = "Dagger"
+damage_dice = "1d4"
+damage_bonus = 1
+damage_type = "piercing"

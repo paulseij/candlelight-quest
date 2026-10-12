@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from text_rpg.rag.vector_store import VectorStore
@@ -29,17 +30,22 @@ class Retriever:
         vector_store: VectorStore,
         embeddings: OllamaEmbeddings,
         top_k: int = 5,
+        db_path: str | None = None,
     ) -> None:
         self.store = vector_store
         self.embeddings = embeddings
         self.top_k = top_k
+        self.db_path = db_path
         self._available: bool | None = None
+        self._checked_at=0.0
+        self._embedding_cache = {}
 
     @property
     def is_available(self) -> bool:
         """Lazy-check whether Ollama is reachable."""
-        if self._available is None:
+        if self._available is None or time.monotonic()-self._checked_at>30:
             self._available = self.embeddings.is_available()
+            self._checked_at=time.monotonic()
         return self._available
 
     # ------------------------------------------------------------------
@@ -47,17 +53,40 @@ class Retriever:
     # ------------------------------------------------------------------
 
     def retrieve_relevant_lore(
-        self, query: str, top_k: int | None = None
+        self, query: str, top_k: int | None = None, game_id: str | None = None
     ) -> list[RetrievalResult]:
         """Find lore relevant to the current scene."""
+        if self.db_path and game_id:
+            from text_rpg.storage.database import Database
+            db=Database(self.db_path)
+            try:
+                with db.get_connection() as conn:
+                    rows=conn.execute("SELECT name,description FROM locations WHERE game_id=? AND visited=1 UNION ALL SELECT name,description FROM quests WHERE game_id=? AND status='active'",(game_id,game_id)).fetchall()
+                words={w.lower().strip('.,?!') for w in query.split() if len(w)>3}
+                candidates=[f"{r[0]}: {r[1]}" for r in rows]
+                candidates.sort(key=lambda text:sum(w in text.lower() for w in words),reverse=True)
+                return [RetrievalResult(text,{"game_id":game_id},0) for text in candidates[:top_k or self.top_k] if any(w in text.lower() for w in words)]
+            finally:
+                db.close()
         if not self.is_available:
             return []
-        return self._query_collection("game_lore", query, top_k or self.top_k)
+        return self._query_collection("game_lore", query, top_k or self.top_k, where={"game_id":game_id}) if game_id else []
 
     def retrieve_relevant_events(
         self, query: str, game_id: str, top_k: int | None = None
     ) -> list[RetrievalResult]:
         """Find past events relevant to the current context."""
+        if self.db_path:
+            from text_rpg.storage.database import Database
+            from text_rpg.storage.repos.event_ledger import EventLedgerRepo
+            db=Database(self.db_path)
+            try:
+                rows=EventLedgerRepo(db).get_recent(game_id,limit=200)
+                words={w.lower().strip('.,?!') for w in query.split() if len(w)>3}
+                rows.sort(key=lambda r:sum(w in (r.get('description') or '').lower() for w in words),reverse=True)
+                return [RetrievalResult(r.get('description') or '',r,0) for r in rows[:top_k or self.top_k]]
+            finally:
+                db.close()
         if not self.is_available:
             return []
         return self._query_collection(
@@ -75,7 +104,16 @@ class Retriever:
     def retrieve_npc_history(
         self, npc_id: str, game_id: str, top_k: int | None = None
     ) -> list[RetrievalResult]:
-        """Retrieve all known facts about an NPC."""
+        """Retrieve only witnessed speech and accepted commitments for this NPC."""
+        if self.db_path:
+            from text_rpg.storage.database import Database
+            from text_rpg.storage.memory import MemoryStore
+            db=Database(self.db_path)
+            try:
+                memory=MemoryStore(db)
+                return [RetrievalResult(r['text'],r,0) for r in memory.conversation(game_id,npc_id,limit=top_k or self.top_k)+memory.commitments(game_id,npc_id)]
+            finally:
+                db.close()
         if not self.is_available:
             return []
         results: list[RetrievalResult] = []
@@ -84,7 +122,7 @@ class Retriever:
             "game_lore",
             f"NPC {npc_id}",
             top_k or self.top_k,
-            where={"npc_id": npc_id},
+            where={"$and": [{"game_id":game_id},{"npc_id": npc_id}]},
         )
         results.extend(lore_results)
         # Events involving this NPC
@@ -92,7 +130,7 @@ class Retriever:
             "events",
             f"NPC {npc_id}",
             top_k or self.top_k,
-            where={"actor_id": npc_id},
+            where={"$and": [{"game_id":game_id},{"$or":[{"actor_id": npc_id},{"target_id":npc_id}]}]},
         )
         results.extend(event_results)
         return results
@@ -117,11 +155,11 @@ class Retriever:
             "past_events": [],
             "srd_reference": [],
         }
-        if not self.is_available:
+        if not self.db_path and not self.is_available:
             return context
 
         # Relevant lore
-        lore = self.retrieve_relevant_lore(scene_description, top_k=3)
+        lore = self.retrieve_relevant_lore(scene_description, top_k=3, game_id=game_id)
         context["relevant_lore"] = [r.text for r in lore]
 
         # Relevant past events
@@ -149,7 +187,10 @@ class Retriever:
         try:
             if self.store.count(collection_name) == 0:
                 return []
-            embedding = self.embeddings.embed(query)
+            embedding = self._embedding_cache.get(query)
+            if embedding is None:
+                embedding = self.embeddings.embed(query)
+                self._embedding_cache = {query:embedding}
             results = self.store.query(
                 collection_name, [embedding], n_results=top_k, where=where
             )

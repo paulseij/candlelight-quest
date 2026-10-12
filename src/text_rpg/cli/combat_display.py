@@ -36,74 +36,57 @@ class CombatDisplay:
         round_num = combat_state.get("round_number", 1)
 
         content = Text()
-        content.append(f"  Round {round_num} — Your Turn\n\n", style="bold yellow")
-
-        # Show enemy HP bars with conditions
-        for enemy in enemies:
-            hp = enemy.get("hp", {})
-            if isinstance(hp, dict):
-                current = hp.get("current", 0)
-                maximum = hp.get("max", 10)
-            else:
-                current = enemy.get("hp_current", 0)
-                maximum = enemy.get("hp_max", 10)
-
-            name = enemy.get("name", "Enemy")
-            bar_w = 12
-            if maximum > 0:
-                pct = max(0, current / maximum)
-                filled = int(pct * bar_w)
-            else:
-                pct = 0
-                filled = 0
-
-            if pct > 0.5:
-                color = "green"
-            elif pct > 0.25:
-                color = "yellow"
-            else:
-                color = "red"
-
-            bar = f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (bar_w - filled)}[/dim]"
-            conditions = enemy.get("conditions", [])
-            cond_str = ""
-            if conditions:
-                cond_tags = []
-                for cond in conditions:
-                    cond_colors = {
-                        "poisoned": "green", "stunned": "yellow",
-                        "frightened": "magenta", "paralyzed": "red",
-                        "prone": "dark_orange", "blinded": "dim",
-                    }
-                    c_color = cond_colors.get(cond.lower(), "cyan")
-                    cond_tags.append(f"[{c_color}]{cond}[/{c_color}]")
-                cond_str = " " + " ".join(cond_tags)
-            content.append(f"  {name:<18} {bar} {current}/{maximum}{cond_str}\n")
-
-        # Show player HP
-        hp_cur = character.get("hp_current", 0)
-        hp_max = character.get("hp_max", 10)
-        pct = hp_cur / max(hp_max, 1)
-        color = "green" if pct > 0.5 else ("yellow" if pct > 0.25 else "red")
-        bar_w = 12
-        filled = int(pct * bar_w)
-        bar = f"[{color}]{'█' * filled}[/{color}][dim]{'░' * (bar_w - filled)}[/dim]"
-        content.append(f"\n  [bold]You[/bold]{'':14} {bar} [{color}]{hp_cur}/{hp_max}[/{color}]\n")
-
+        pending = any(c.get("opening_pending") for c in combat_state.get("combatants", []))
+        content.append(f"Round {round_num} — {'Choose your opening action' if pending else 'Your turn'}\n", style="bold yellow")
+        if pending:
+            content.append("Initiative determines who acts first.\n", style="dim")
+        combatants = {c.get("entity_id"): c for c in combat_state.get("combatants", [])}
+        ordered = [combatants[entity_id].get("name", "?")
+                   for entity_id in combat_state.get("turn_order", []) if entity_id in combatants]
+        if ordered:
+            content.append("Initiative: " + " → ".join(ordered) + "\n", style="cyan")
+        for unit, player in [(e, False) for e in enemies] + [(character, True)]:
+            hp = unit.get("hp")
+            current = hp.get("current", 0) if isinstance(hp, dict) else unit.get("hp_current", 0)
+            maximum = hp.get("max", 10) if isinstance(hp, dict) else unit.get("hp_max", 10)
+            pct = max(0, min(1, current / max(maximum, 1)))
+            filled = int(pct * 12)
+            color = "green" if pct > .5 else "yellow" if pct > .25 else "red"
+            content.append("\n" + ("You" if player else unit.get("name", "Enemy")) + "  ", style="bold")
+            content.append("█" * filled, style=color)
+            content.append("░" * (12 - filled), style="dim")
+            content.append(f" {current}/{maximum}\n")
+            if unit.get("conditions"):
+                content.append(", ".join(str(c) for c in unit["conditions"]) + "\n", style="yellow")
+            if not player:
+                content.append("Intent: " + self._enemy_intent(unit, character) + "\n", style="magenta")
         content.append("\n")
-        content.append("  [cyan bold][1][/cyan bold] Attack     ", style="")
-        content.append("[cyan bold][2][/cyan bold] Cast Spell\n", style="")
-        content.append("  [cyan bold][3][/cyan bold] Use Item   ", style="")
-        content.append("[cyan bold][4][/cyan bold] Flee\n", style="")
-        content.append("  [cyan bold][5][/cyan bold] Dodge", style="")
+        living = [enemy for enemy in enemies if enemy.get("is_active", True)]
+        attack_label = (f"Attack {living[0].get('name', 'enemy')}" if len(living) == 1
+                        else "Attack <target>")
+        labels = [attack_label, "Cast Spell", "Use Item", "Flee", "Dodge"]
+        ability = self._get_class_ability_label(character)
+        if ability:
+            labels.append(ability)
+        for number, label in enumerate(labels, 1):
+            content.append(f"[{number}] ", style="bold cyan")
+            content.append(label + "\n")
+        content.append("\nOther: grapple <target>, disengage, dash\n", style="dim")
+        self.console.print(Panel(content, border_style="red", box=box.ROUNDED, width=min(76, self.console.width)))
 
-        # Show class-specific ability if applicable
-        class_ability = self._get_class_ability_label(character)
-        if class_ability:
-            content.append(f"      [cyan bold][6][/cyan bold] {class_ability}", style="")
-        content.append("\n")
-
-        self.console.print(Panel(content, border_style="red", box=box.ROUNDED, width=42))
+    @staticmethod
+    def _enemy_intent(enemy: dict, character: dict) -> str:
+        """Telegraph the deterministic AI choice represented by current state."""
+        hp = enemy.get("hp", {})
+        current = hp.get("current", 0) if isinstance(hp, dict) else enemy.get("hp_current", 0)
+        maximum = hp.get("max", 1) if isinstance(hp, dict) else enemy.get("hp_max", 1)
+        if maximum and current / maximum < 0.25:
+            return "trying to escape"
+        attacks = enemy.get("attacks") or []
+        index = int(enemy.get("next_attack_index", 0)) % len(attacks) if attacks else 0
+        attack = attacks[index] if attacks and isinstance(attacks[index], dict) else {}
+        attack_name = attack.get("name") or attack.get("attack_name") or "a direct attack"
+        return f"{attack_name} against you (AC {character.get('ac', 10)})"
 
     def show_threat_warning(self, threats: list[tuple[str, str]]) -> None:
         """Show danger warnings before combat. threats is [(name, level)]."""

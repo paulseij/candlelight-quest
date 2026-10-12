@@ -12,7 +12,7 @@ Description: {{ quest_description }}
 NPC's underlying motivation: {{ npc_motivation }}
 Objectives:
 {% for obj in objectives %}
-- {{ obj.description }} (negotiable: {{ obj.negotiable }})
+- id={{ obj.id }} — {{ obj.description }} (count: {{ obj.target_count | default(1) }}, negotiable: {{ obj.negotiable }})
 {% endfor %}
 
 ## Player's Proposal
@@ -27,16 +27,16 @@ Evaluate whether the NPC would accept this modification. Consider:
 - The persuasion check result
 - Objectives marked non-negotiable should be very hard to change
 
+Negotiation can only soften terms: adjust an objective's required count downward or reword its description. It cannot add objectives, remove them, or change what they target.
+
 Respond in JSON only:
 {
   "accepted": true or false,
   "modified_objectives": [
     {
-      "description": "Updated objective text if modified",
-      "target_type": "same or new type",
-      "target_id": "same or new target",
-      "required_count": adjusted count,
-      "negotiable": true or false
+      "id": "the exact objective id being adjusted",
+      "description": "Updated objective text",
+      "target_count": adjusted count (1 or more, at most the original)
     }
   ],
   "npc_response": "The NPC's in-character response to the proposal (2-3 sentences)",

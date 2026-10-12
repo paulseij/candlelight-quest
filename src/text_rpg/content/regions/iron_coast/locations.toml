@@ -23,6 +23,7 @@ direction = "south"
 description = "Slippery stone steps descend along the cliff face toward dark cave openings revealed by the retreating tide."
 is_locked = false
 
+
 [[locations.connections]]
 target_location_id = "saltmere_tavern"
 direction = "north"
@@ -98,6 +99,12 @@ region_id = "iron_coast"
 description = "A labyrinth of sea-carved tunnels beneath the cliffs, accessible only when the tide pulls back. The walls are slick with brine and barnacles, and the echoing drip of water masks other sounds. Smugglers have used these passages for generations to move contraband past the harbor watch."
 location_type = "dungeon"
 
+[[locations.properties.discoveries]]
+id = "cave_patrol_tracks"
+dc = 12
+description = "Wet bootprints lead south behind the waterfall, while deep claw marks score the lower rocks. These caves are used by smugglers and large crustaceans; staying here is risky."
+
+
 [[locations.connections]]
 target_location_id = "saltmere_docks"
 direction = "north"
@@ -109,6 +116,8 @@ target_location_id = "smuggler_den"
 direction = "south"
 description = "Behind a curtain of falling water, a narrow passage leads deeper into a hidden chamber."
 is_locked = false
+
+
 
 [[locations.connections]]
 target_location_id = "beach_camp"
@@ -261,6 +270,18 @@ name = "Smuggler's Den"
 region_id = "iron_coast"
 description = "A hidden chamber carved into the tide cave walls, concealed behind a waterfall. Crates of contraband are stacked high, and escape tunnels lead in every direction."
 location_type = "dungeon"
+
+[[locations.properties.discoveries]]
+id = "contraband_manifest"
+dc = 12
+description = "Behind a loose crate board you find a cargo manifest marked for Saltmere Docks. A note reads: 'Use the waterfall passage. The other tunnels have collapsed.' You copy the markings into your notes."
+
+
+[[locations.properties.discoveries]]
+id = "smuggler_watch_signs"
+dc = 12
+description = "Fresh bootprints and a still-warm lantern show this den is in active use. A smuggler patrol may return; the north passage leads back to Tide Caves."
+
 
 [[locations.connections]]
 target_location_id = "tide_caves"

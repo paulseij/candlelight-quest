@@ -37,6 +37,7 @@ late_night = "adventurers_guild"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "arcane_dust"]
 disliked_gifts = ["rations", "torch"]
+quest_hook = "Adventurers have been disappearing in the sewers beneath the city — the Guild needs someone to investigate"
 
 [[npcs.attacks]]
 name = "Rapier"
@@ -87,6 +88,7 @@ late_night = "mages_tower"
 [npcs.properties]
 preferred_gifts = ["arcane_dust", "soul_gem", "moonpetal"]
 disliked_gifts = ["rations", "iron_ingot"]
+quest_hook = "Dangerous magical artifacts have been surfacing on the black market — someone is raiding the sealed arcane vaults"
 
 [[npcs.attacks]]
 name = "Arcane Blast"
@@ -130,6 +132,7 @@ late_night = "grand_cathedral"
 [npcs.properties]
 preferred_gifts = ["holy_symbol", "moonpetal", "healing_herb"]
 disliked_gifts = ["nightshade", "poison_vial", "dagger"]
+revival_resources = { method = "temple_intercession", charges = 1, materials_gp = 500, target_ids = ["healer_rosa", "lord_baric"], ready_at = 0, offers_service = true, price_gp = 750 }
 
 [[npcs.attacks]]
 name = "Divine Radiance"
@@ -217,6 +220,7 @@ late_night = "thieves_den"
 [npcs.properties]
 preferred_gifts = ["dagger", "arcane_dust", "soul_gem"]
 disliked_gifts = ["holy_symbol", "healing_herb"]
+quest_hook = "A new player in the underworld is making moves against my people — I need someone expendable to find out who"
 
 [[npcs.attacks]]
 name = "Shadow Daggers"
@@ -304,6 +308,7 @@ late_night = "kingsward_arena"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "rations"]
 disliked_gifts = ["moonpetal", "holy_symbol"]
+quest_hook = "The arena's champion beast has escaped into the training grounds — I need someone to recapture it before the next tournament"
 
 [[npcs.attacks]]
 name = "Greataxe"

@@ -1,0 +1,10 @@
+[[items]]
+id = "revivify_diamond"
+name = "Revivify Diamond"
+description = "An appraised diamond worth 300 gp, consumed by Revivify."
+item_type = "material"
+weight = 0.01
+value_gp = 300
+rarity = "rare"
+[items.properties]
+spell_component = "diamond"

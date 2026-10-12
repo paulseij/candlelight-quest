@@ -13,7 +13,8 @@ def validate_mutations(mutations: list[StateMutation], context: GameContext) -> 
     for m in mutations:
         if m.field == "hp_current" and isinstance(m.new_value, (int, float)):
             # Clamp HP between 0 and max
-            max_hp = context.character.get("hp_max", 100)
+            target = context.character if not m.target_id or m.target_id == context.character.get("id") else next((e for e in context.entities if e.get("id") == m.target_id), {})
+            max_hp = target.get("hp_max", 100)
             m.new_value = max(0, min(int(m.new_value), max_hp))
         validated.append(m)
     return validated
@@ -21,6 +22,13 @@ def validate_mutations(mutations: list[StateMutation], context: GameContext) -> 
 
 def validate_action(action: Action, context: GameContext) -> tuple[bool, str]:
     """Validate whether an action can be taken."""
+    if action.action_type in {"attack", "talk", "interact"} and action.target_id:
+        import re
+        target = re.sub(r"^(the|a|an)\s+", "", action.target_id.lower()).strip()
+        exact = [e for e in context.entities if target in {e.get("id",""), e.get("name", "").lower()}]
+        matches = exact or [e for e in context.entities if target and target in e.get("name", "").lower() and e.get("is_alive",True)]
+        if len(matches)>1:
+            return False, "Which do you mean? " + ", ".join(e.get("name", e["id"]) for e in matches)
     char = context.character
     conditions = safe_json(char.get("conditions"), [])
 

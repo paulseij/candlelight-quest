@@ -37,6 +37,7 @@ late_night = "harpooners_hall"
 [npcs.properties]
 preferred_gifts = ["rations", "healing_potion", "hempen_rope"]
 disliked_gifts = ["nightshade", "arcane_dust"]
+quest_hook = "Something massive has been destroying fishing nets in the deep waters — the Guild's livelihood is at stake"
 
 [[npcs.attacks]]
 name = "Harpoon"
@@ -168,6 +169,7 @@ late_night = "privateer_dock"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "dagger"]
 disliked_gifts = ["holy_symbol", "healing_herb"]
+quest_hook = "A rival ship has been hitting merchant vessels along the coast, and there's a fat bounty on its captain"
 
 [[npcs.attacks]]
 name = "Rapier"

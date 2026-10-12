@@ -30,6 +30,12 @@ class GameApp:
         self.config = _load_config()
         self.model_override = model_override
 
+        # Resolved provider (set lazily by llm property)
+        self._resolved_provider: str | None = None
+
+        # Why RAG is disabled, if it is (set when embeddings are constructed)
+        self.rag_disabled_reason: str | None = None
+
         # Lazy-initialized components
         self._db = None
         self._llm = None
@@ -64,15 +70,47 @@ class GameApp:
         return self._db
 
     @property
+    def resolved_provider(self) -> str:
+        """The active LLM provider, accounting for --model overrides."""
+        if self._resolved_provider is None:
+            from text_rpg.llm.models import infer_provider
+
+            if self.model_override:
+                self._resolved_provider = infer_provider(self.model_override)
+            else:
+                self._resolved_provider = self.config.get("llm", {}).get("provider", "ollama")
+        return self._resolved_provider
+
+    @property
     def llm(self):
         if self._llm is None:
-            from text_rpg.llm.ollama_provider import OllamaProvider
+            from text_rpg.llm.env import load_env, get_api_key
+            from text_rpg.llm.ollama_provider import DEFAULT_LOCAL_MODEL
 
+            load_env()
             llm_cfg = self.config.get("llm", {})
-            model = self.model_override or llm_cfg.get("model", "mistral")
-            base_url = llm_cfg.get("base_url", "http://localhost:11434")
-            num_ctx = llm_cfg.get("num_ctx", 4096)
-            self._llm = OllamaProvider(model=model, base_url=base_url, num_ctx=num_ctx)
+            model = self.model_override or llm_cfg.get("model", DEFAULT_LOCAL_MODEL)
+            provider = self.resolved_provider
+
+            if provider == "ollama":
+                from text_rpg.llm.ollama_provider import OllamaProvider
+
+                base_url = llm_cfg.get("base_url", "http://localhost:11434")
+                num_ctx = llm_cfg.get("num_ctx", 8192)
+                think = llm_cfg.get("think", False)
+                # OllamaProvider prepends "ollama/" itself — strip a catalog-style prefix
+                model = model.removeprefix("ollama/")
+                self._llm = OllamaProvider(model=model, base_url=base_url, num_ctx=num_ctx, think=think)
+            else:
+                from text_rpg.llm.litellm_provider import LiteLLMProvider
+
+                api_key = get_api_key(provider)
+                # For anthropic models, ensure the model ID has the prefix
+                if provider == "anthropic" and not model.startswith("anthropic/"):
+                    model = f"anthropic/{model}"
+                self._llm = LiteLLMProvider(model=model, api_key=api_key)
+        self._llm.scene_temperature = self.config.get("llm",{}).get("scene_planner",{}).get("temperature",0.0)
+        self._llm.scene_max_tokens = self.config.get("llm",{}).get("scene_planner",{}).get("max_tokens",160)
         return self._llm
 
     @property
@@ -83,19 +121,61 @@ class GameApp:
             rag_cfg = self.config.get("rag", {})
             prefix = rag_cfg.get("collection_prefix", "text_rpg")
             self._vector_store = VectorStore(
-                persist_dir="data/chromadb", collection_prefix=prefix
+                persist_dir="data/chromadb",
+                collection_prefix=prefix,
+                embedding_tag=getattr(self.embeddings, "model_tag", ""),
             )
         return self._vector_store
 
     @property
     def embeddings(self):
         if self._embeddings is None:
-            from text_rpg.rag.embeddings import OllamaEmbeddings
+            from text_rpg.llm.env import load_env, get_api_key
+            from text_rpg.rag.embeddings import LiteLLMEmbeddings, OllamaEmbeddings
 
+            load_env()
             rag_cfg = self.config.get("rag", {})
-            model = rag_cfg.get("embedding_model", "nomic-embed-text")
-            base_url = rag_cfg.get("embedding_base_url", "http://localhost:11434")
-            self._embeddings = OllamaEmbeddings(model=model, base_url=base_url)
+            provider = self.resolved_provider
+            # [rag] embedding_provider overrides; else follow the LLM provider.
+            embed_provider = rag_cfg.get("embedding_provider") or provider
+
+            self.rag_disabled_reason = None
+
+            def _ollama():
+                return OllamaEmbeddings(
+                    model=rag_cfg.get("embedding_model", "nomic-embed-text"),
+                    base_url=rag_cfg.get("embedding_base_url", "http://localhost:11434"),
+                )
+
+            def _openai():
+                return LiteLLMEmbeddings(
+                    model="text-embedding-3-small", api_key=get_api_key("openai"),
+                )
+
+            if embed_provider == "openai":
+                self._embeddings = _openai()
+            elif embed_provider == "ollama":
+                self._embeddings = _ollama()
+            else:
+                # Providers without an embedding API (e.g. Anthropic):
+                # fall back to Ollama if it's running, else OpenAI-key
+                # embeddings, else RAG stays visibly disabled.
+                candidate = _ollama()
+                if candidate.is_available():
+                    self._embeddings = candidate
+                elif get_api_key("openai"):
+                    self._embeddings = _openai()
+                else:
+                    self._embeddings = candidate
+                    self.rag_disabled_reason = (
+                        f"No embedding provider for '{provider}': install Ollama with "
+                        "nomic-embed-text, set OPENAI_API_KEY, or set [rag] embedding_provider."
+                    )
+
+            if self.rag_disabled_reason is None and not self._embeddings.is_available():
+                self.rag_disabled_reason = (
+                    "Embedding backend unreachable — semantic search is deferred; saved conversations remain available."
+                )
         return self._embeddings
 
     @property
@@ -103,7 +183,7 @@ class GameApp:
         if self._indexer is None:
             from text_rpg.rag.indexer import Indexer
 
-            self._indexer = Indexer(self.vector_store, self.embeddings)
+            self._indexer = Indexer(self.vector_store, self.embeddings, db=self.db)
         return self._indexer
 
     @property
@@ -113,7 +193,7 @@ class GameApp:
 
             top_k = self.config.get("rag", {}).get("top_k", 5)
             self._retriever = Retriever(
-                self.vector_store, self.embeddings, top_k=top_k
+                self.vector_store, self.embeddings, top_k=top_k, db_path=self.db.db_path
             )
         return self._retriever
 
@@ -194,6 +274,7 @@ class GameApp:
     # -- Repos (convenience accessors) --
 
     def _get_repos(self) -> dict[str, Any]:
+        self.db.active_game_id = self.game_id
         from text_rpg.storage.repos.save_game_repo import SaveGameRepo
         from text_rpg.storage.repos.character_repo import CharacterRepo
         from text_rpg.storage.repos.entity_repo import EntityRepo
@@ -212,6 +293,7 @@ class GameApp:
         from text_rpg.storage.repos.trait_repo import TraitRepo
         from text_rpg.storage.repos.spell_creation_repo import SpellCreationRepo
         from text_rpg.storage.repos.guild_repo import GuildRepo
+        from text_rpg.storage.repos.custom_item_repo import CustomItemRepo
 
         return {
             "save_game": SaveGameRepo(self.db),
@@ -232,6 +314,7 @@ class GameApp:
             "trait": TraitRepo(self.db),
             "spell_creation": SpellCreationRepo(self.db),
             "guild": GuildRepo(self.db),
+            "custom_item": CustomItemRepo(self.db),
         }
 
     # -- Public interface --
@@ -265,7 +348,7 @@ class GameApp:
     def new_game(self) -> None:
         """Start a new game with character creation."""
         from text_rpg.cli.character_creator import CharacterCreator
-        from text_rpg.content.loader import load_all_races, load_all_classes, load_all_origins, load_region
+        from text_rpg.content.loader import load_all_races, load_all_classes, load_all_origins
         from text_rpg.mechanics.character_creation import create_character
 
         # Character creation — origins are loaded and passed into the creator
@@ -322,110 +405,13 @@ class GameApp:
         )
         repos["character"].save(char_dict)
 
-        # Load and save starting region
-        region_data = load_region(starting_region)
-        region_dict = {
-            "id": region_data["id"],
-            "game_id": self.game_id,
-            "name": region_data["name"],
-            "description": region_data["description"],
-            "locations": json.dumps([loc["id"] for loc in region_data.get("locations", [])]),
-            "level_range_min": region_data.get("level_range_min", 1),
-            "level_range_max": region_data.get("level_range_max", 5),
-            "climate": region_data.get("climate", "temperate"),
-            "faction": region_data.get("faction"),
-        }
-        repos["world_state"].save_region(region_dict)
+        # Seed the starting region (locations, connections, NPCs, quests, shops)
+        from text_rpg.content.region_seeder import seed_region
 
-        # Save locations
-        for loc in region_data.get("locations", []):
-            loc_dict = {
-                "id": loc["id"],
-                "game_id": self.game_id,
-                "name": loc["name"],
-                "region_id": starting_region,
-                "description": loc["description"],
-                "location_type": loc.get("location_type", "wilderness"),
-                "connections": json.dumps(loc.get("connections", [])),
-                "entities": json.dumps(loc.get("entities", [])),
-                "items": json.dumps(loc.get("items", [])),
-                "visited": loc["id"] == starting_location,
-                "properties": json.dumps(loc.get("properties", {})),
-            }
-            repos["location"].save(loc_dict)
-
-            # Insert connections into dedicated table
-            for c in loc.get("connections", []):
-                if isinstance(c, dict) and c.get("target_location_id") and c.get("direction"):
-                    repos["connection"].add_connection(
-                        game_id=self.game_id,
-                        source_id=loc["id"],
-                        target_id=c["target_location_id"],
-                        direction=c["direction"],
-                        description=c.get("description", ""),
-                        is_locked=c.get("is_locked", False),
-                    )
-
-        # Save NPCs
-        for npc in region_data.get("npcs", []):
-            entity_dict = {
-                "id": npc["id"],
-                "game_id": self.game_id,
-                "name": npc["name"],
-                "entity_type": "npc",
-                "description": npc.get("description", ""),
-                "ability_scores": json.dumps(npc.get("ability_scores", {})),
-                "hp_current": npc.get("hp_current", 10),
-                "hp_max": npc.get("hp_max", 10),
-                "hp_temp": 0,
-                "ac": npc.get("ac", 10),
-                "speed": npc.get("speed", 30),
-                "level": npc.get("level", 1),
-                "challenge_rating": npc.get("challenge_rating"),
-                "attacks": json.dumps(npc.get("attacks", [])),
-                "behaviors": json.dumps(npc.get("behaviors", [])),
-                "dialogue_tags": json.dumps(npc.get("dialogue_tags", [])),
-                "location_id": npc.get("location_id", starting_location),
-                "loot_table": json.dumps(npc.get("loot_table", [])),
-                "is_hostile": npc.get("is_hostile", False),
-                "is_alive": True,
-                "profession": npc.get("profession"),
-                "schedule": json.dumps(npc.get("schedule")) if npc.get("schedule") else None,
-                "unavailable_periods": json.dumps(npc.get("unavailable_periods", [])),
-            }
-            repos["entity"].save(entity_dict)
-
-        # Save quests
-        for quest in region_data.get("quests", []):
-            quest_dict = {
-                "id": quest["id"],
-                "game_id": self.game_id,
-                "name": quest["name"],
-                "description": quest["description"],
-                "quest_giver_id": quest.get("quest_giver_id"),
-                "status": quest.get("status", "available"),
-                "objectives": json.dumps(quest.get("objectives", [])),
-                "xp_reward": quest.get("xp_reward", 0),
-                "item_rewards": json.dumps(quest.get("item_rewards", [])),
-                "gold_reward": quest.get("gold_reward", 0),
-                "level_requirement": quest.get("level_requirement", 1),
-            }
-            repos["world_state"].save_quest(quest_dict)
-
-        # Save shops
-        for shop in region_data.get("shops", []):
-            shop_dict = {
-                "id": shop["id"],
-                "game_id": self.game_id,
-                "owner_entity_id": shop["owner_entity_id"],
-                "location_id": shop["location_id"],
-                "shop_type": shop.get("shop_type", "general"),
-                "stock": shop.get("stock", []),
-                "gold_reserve": shop.get("gold_reserve", 500),
-                "price_modifier": shop.get("price_modifier", 1.0),
-                "restock_turn": 0,
-            }
-            repos["shop"].save_shop(shop_dict)
+        seed_region(
+            starting_region, self.game_id, repos,
+            visited_location_id=starting_location,
+        )
 
         # Create inventory
         from text_rpg.content.loader import load_all_items
@@ -596,14 +582,12 @@ class GameApp:
             self.display.show_error(f"Location '{current_location_id}' not found.")
             return
 
-        # Show initial location
-        self._show_location(location, repos)
-
         # Build context packer and turn loop
         from text_rpg.llm.context_packer import ContextPacker
         from text_rpg.engine.turn_loop import TurnLoop
 
-        context_packer = ContextPacker()
+        from text_rpg.llm.token_budget import TokenBudget
+        context_packer = ContextPacker(TokenBudget(max_context_tokens=1200))
 
         # Inject dependencies into all registered systems
         self.dispatcher.repos = repos
@@ -626,8 +610,31 @@ class GameApp:
             world_sim=world_sim,
         )
 
+        from text_rpg.engine.campaign import CampaignRuntime
+        campaign = CampaignRuntime(repos)
+        if campaign.ensure(self.game_id):
+            self.display.show_info(campaign.get(self.game_id)['template']['opening'])
+        if campaign.get(self.game_id):
+            self.display.show_info('Use leads for campaign objectives, routes, and evidence; history recalls major events.')
+        self._show_location(location, repos)
+
+        from text_rpg.llm.ollama_provider import OllamaProvider
+        if isinstance(self.llm,OllamaProvider):
+            import threading
+            threading.Thread(target=self.llm.warmup,name="rpg-model-warmup",daemon=True).start()
+
         autosave_interval = self.config.get("game", {}).get("autosave_interval", 5)
+        narrator_cfg = self.config.get("llm",{}).get("narrator",{})
+        turn_loop.dialogue_temperature = narrator_cfg.get("temperature",0.7)
+        turn_loop.dialogue_max_tokens = narrator_cfg.get("max_tokens",200)
         turn_number = game.get("turn_number", 0)
+
+        # RAG health: warn when disabled, rebuild vectors after a provider switch
+        _ = self.embeddings  # ensure rag_disabled_reason has been evaluated
+        if self.rag_disabled_reason:
+            self.display.show_info(f"Note: {self.rag_disabled_reason}")
+        else:
+            self._maybe_reindex_rag(repos)
 
         while True:
             # Refresh character for status bar
@@ -644,6 +651,7 @@ class GameApp:
             world_time_info = {
                 "time_of_day": world_clock.get_period(wt),
                 "day": world_clock.get_day(wt),
+                "clock": f"{world_clock.get_hour(wt):02d}:{world_clock.get_minute(wt):02d}",
             }
             self.status_bar.render(self.character, loc_name, world_time_info)
 
@@ -667,6 +675,9 @@ class GameApp:
 
             # Handle meta commands locally (work even in conversation)
             classified = self.input_handler.classify(raw_input)
+            if raw_input.strip().lower() in {'campaign', 'campaign journal'}:
+                self.display.show_info(campaign.journal(self.game_id))
+                continue
             if classified.get("is_meta"):
                 meta_result = self._handle_meta(classified, repos, turn_number, turn_loop)
                 if meta_result == "break":
@@ -684,34 +695,46 @@ class GameApp:
 
             # Process game turn
             try:
-                result = turn_loop.process_turn(raw_input, self.game_id)
+                with self.display.console.status("Processing your turn…", spinner="dots") as status:
+                    turn_loop.progress_callback = status.update
+                    try:
+                        result = turn_loop.process_turn(raw_input, self.game_id)
+                    finally:
+                        turn_loop.progress_callback = None
             except Exception as e:
                 logger.exception("Turn processing error")
                 self.display.show_error(f"Something went wrong: {e}")
                 continue
 
-            turn_number += 1
-            repos["save_game"].update_turn(self.game_id, turn_number)
+            turn_number = repos["save_game"].get_game(self.game_id)["turn_number"]
 
-            # Show dice rolls
+            # Show dice rolls (DiceRoll dataclasses, or dicts for safety)
             if result.action_result and hasattr(result.action_result, "dice_rolls"):
                 for dr in result.action_result.dice_rolls:
-                    if isinstance(dr, dict):
-                        self.display.show_dice_roll(
-                            dr.get("dice_expression", ""),
-                            dr.get("rolls", []),
-                            dr.get("modifier", 0),
-                            dr.get("total", 0),
-                            dr.get("purpose", ""),
-                        )
+                    data = dr if isinstance(dr, dict) else vars(dr)
+                    self.display.show_dice_roll(
+                        data.get("dice_expression", ""),
+                        data.get("rolls", []),
+                        data.get("modifier", 0),
+                        data.get("total", 0),
+                        data.get("purpose", ""),
+                    )
 
             # Show mechanical summary
-            if result.mechanical_summary:
+            if result.mechanical_summary and not (self.display.show_dice and result.action_result and result.action_result.dice_rolls):
                 self.display.show_mechanical_summary(result.mechanical_summary)
 
             # Show narrative
             if result.narrative:
                 self.display.show_narrative(result.narrative)
+
+            # One-time warning when narration degraded because the LLM is unreachable
+            if getattr(result, "llm_degraded", False) and not getattr(self, "_llm_warned", False):
+                self._llm_warned = True
+                self.display.show_error(
+                    "The storyteller (LLM provider) is unreachable — using plain mechanical text. "
+                    "Check your connection or API key, or run 'text-rpg setup'."
+                )
 
             # Process post-turn events (quests, reputation, bounties)
             event_handler.process(result)
@@ -813,6 +836,8 @@ class GameApp:
     def _show_location(self, location: dict, repos: dict) -> None:
         """Display a location with its entities and items."""
         connections = safe_json(location.get("connections"), [])
+        if repos.get("connection"):
+            connections = repos["connection"].get_connections(self.game_id, location["id"])
 
         entities_ids = safe_json(location.get("entities"), [])
 
@@ -834,19 +859,45 @@ class GameApp:
                     continue  # NPC is sleeping/unavailable
                 entity_names.append(e["name"])
 
-        items_ids = safe_json(location.get("items"), [])
+        from text_rpg.systems.inventory.pickup import ground_entries
+        from text_rpg.systems.item_catalog import get_item_catalog
+        catalog = get_item_catalog(repos, self.game_id, (self.character or {}).get("id"))
+        items_ids = [f"{entry['name']} (x{entry['quantity']})"
+                     for entry in ground_entries(location.get("items"), catalog)]
 
         # Build location name with time
         time_str = world_clock.format_short(wt)
         display_name = f"{location['name']} — {time_str}"
+        from text_rpg.engine.continuity import Continuity
+        condition = Continuity(repos).location_condition(self.game_id, location['id'])
+        description = location.get('description', '')
+        if condition and condition['condition'] == 'destroyed':
+            description = 'This place was destroyed. Ruins and debris remain; former services and ordinary daily activity have stopped.'
+        elif condition and condition['condition'] == 'rebuilt':
+            description = 'This place has been rebuilt since its destruction. ' + description
+
+        from text_rpg.engine.scene_actions import SceneActions
+        from text_rpg.engine.scene_detail import scene_summary
+        from text_rpg.systems.base import GameContext
+        scene_location = dict(location, description=description)
+        scene_context = GameContext(self.game_id, self.character or {}, scene_location, loc_entities)
+        summary = scene_summary(scene_location, SceneActions(repos, None).objects(scene_context), loc_entities,
+                                period, self.game_id, wt)
+        if summary:
+            description += '\n\n' + summary
 
         self.display.show_location(
             name=display_name,
-            description=location.get("description", ""),
+            description=description + self._campaign_scene(repos, location['id']),
             exits=connections,
             entities=entity_names if entity_names else None,
             items=items_ids if items_ids else None,
         )
+
+    def _campaign_scene(self, repos, location_id):
+        from text_rpg.engine.campaign import CampaignRuntime
+        text = CampaignRuntime(repos).scene(self.game_id, location_id)
+        return '\n\n' + text if text else ''
 
     def _show_inventory(
         self, repos: dict, category_filter: str | None = None,
@@ -862,10 +913,10 @@ class GameApp:
 
         items_data = safe_json(inv.get("items"), [])
 
-        from text_rpg.content.loader import load_all_items
         from text_rpg.mechanics.ability_scores import modifier
+        from text_rpg.systems.item_catalog import get_item_catalog
 
-        all_items = load_all_items()
+        all_items = get_item_catalog(repos, self.game_id, self.character.get("id"))
         gold = self.character.get("gold", 0)
 
         # Calculate carry weight and max
@@ -898,8 +949,8 @@ class GameApp:
         if not self.character:
             return
 
-        from text_rpg.content.loader import load_all_items
-        all_items = load_all_items()
+        from text_rpg.systems.item_catalog import get_item_catalog
+        all_items = get_item_catalog(repos, self.game_id, self.character.get("id"))
 
         equipped_items = {}
         weapon_id = self.character.get("equipped_weapon_id")
@@ -1322,13 +1373,18 @@ class GameApp:
             self.display.show_info("You remain in the present.")
             return
 
-        config = RESTORE_PRESETS["artifact"]
-        serializer = StateSerializer(repos)
-        serializer.restore(self.game_id, snapshot, config)
+        try:
+            config = RESTORE_PRESETS["artifact"]
+            serializer = StateSerializer(repos)
+            serializer.restore(self.game_id, snapshot, config)
 
-        game = repos["save_game"].get_game(self.game_id)
-        loop_count = game.get("loop_count", 1)
-        serializer.record_canon_entry(self.game_id, snapshot["id"], "rewind", loop_count)
+            game = repos["save_game"].get_game(self.game_id)
+            loop_count = game.get("loop_count", 1)
+            serializer.record_canon_entry(self.game_id, snapshot["id"], "rewind", loop_count)
+        except Exception:
+            logger.exception("Rewind failed")
+            self.display.show_error("The threads of time resist you. The rewind failed; the present remains unchanged.")
+            return
 
         # End any active conversation
         turn_loop.end_conversation()
@@ -1345,6 +1401,25 @@ class GameApp:
         location = repos["location"].get(snapshot["location_id"], self.game_id)
         if location:
             self._show_location(location, repos)
+
+    def _maybe_reindex_rag(self, repos: dict) -> None:
+        """Rebuild vectors when the current embedding model's store is empty
+        but the events ledger is not (i.e. after an embedding provider switch)."""
+        try:
+            if not self.indexer.is_available:
+                return
+            ledger_count = repos["event_ledger"].count(self.game_id)
+            if ledger_count == 0:
+                return
+            if self.vector_store.has_any("events", {"game_id": self.game_id}):
+                return
+            self.display.show_info(
+                "Rebuilding the GM's memory for the current embedding model "
+                f"({ledger_count} events)... this happens once after switching providers."
+            )
+            self.indexer.reindex_from_db(repos, self.game_id)
+        except Exception as e:
+            logger.warning(f"RAG reindex check failed: {e}")
 
     def _save_game(self, repos: dict, turn_number: int) -> None:
         """Save current game state."""

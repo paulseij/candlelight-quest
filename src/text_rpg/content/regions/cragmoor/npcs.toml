@@ -37,6 +37,7 @@ late_night = "hammerfall_hall"
 [npcs.properties]
 preferred_gifts = ["iron_ingot", "healing_potion"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "Tremors have been shaking the deep tunnels, and miners report strange lights flickering in the abandoned shafts"
 
 [[npcs.attacks]]
 name = "Ancient Warhammer"
@@ -252,6 +253,7 @@ late_night = "silver_mines"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "lantern", "rations"]
 disliked_gifts = ["arcane_dust", "spider_silk"]
+quest_hook = "A new vein collapsed and something crawled out — we sealed the tunnel but it's still in there"
 
 [[npcs.attacks]]
 name = "Mining Pick"

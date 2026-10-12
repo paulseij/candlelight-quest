@@ -28,10 +28,11 @@ class ShopRepo:
             results.append(shop)
         return results
 
-    def get_shop(self, shop_id: str) -> dict | None:
+    def get_shop(self, shop_id: str, game_id: str | None = None) -> dict | None:
         """Get a single shop by ID."""
+        game_id = self.db.resolve_game_scope("shops", shop_id, game_id)
         with self.db.get_connection() as conn:
-            row = conn.execute("SELECT * FROM shops WHERE id = ?", (shop_id,)).fetchone()
+            row = conn.execute("SELECT * FROM shops WHERE id = ? AND game_id = ?", (shop_id, game_id)).fetchone()
         if not row:
             return None
         shop = dict(row)
@@ -78,26 +79,29 @@ class ShopRepo:
                 ),
             )
 
-    def update_stock(self, shop_id: str, stock: list[dict]) -> None:
+    def update_stock(self, shop_id: str, stock: list[dict], game_id: str | None = None) -> None:
         """Update a shop's stock."""
+        game_id = self.db.resolve_game_scope("shops", shop_id, game_id)
         with self.db.get_connection() as conn:
             conn.execute(
-                "UPDATE shops SET stock = ? WHERE id = ?",
-                (json.dumps(stock), shop_id),
+                "UPDATE shops SET stock = ? WHERE id = ? AND game_id = ?",
+                (json.dumps(stock), shop_id, game_id),
             )
 
-    def update_gold_reserve(self, shop_id: str, gold: int) -> None:
+    def update_gold_reserve(self, shop_id: str, gold: int, game_id: str | None = None) -> None:
         """Update a shop's gold reserve."""
+        game_id = self.db.resolve_game_scope("shops", shop_id, game_id)
         with self.db.get_connection() as conn:
             conn.execute(
-                "UPDATE shops SET gold_reserve = ? WHERE id = ?",
-                (gold, shop_id),
+                "UPDATE shops SET gold_reserve = ? WHERE id = ? AND game_id = ?",
+                (gold, shop_id, game_id),
             )
 
-    def update_price_modifier(self, shop_id: str, modifier: float) -> None:
+    def update_price_modifier(self, shop_id: str, modifier: float, game_id: str | None = None) -> None:
         """Update a shop's price modifier."""
+        game_id = self.db.resolve_game_scope("shops", shop_id, game_id)
         with self.db.get_connection() as conn:
             conn.execute(
-                "UPDATE shops SET price_modifier = ? WHERE id = ?",
-                (modifier, shop_id),
+                "UPDATE shops SET price_modifier = ? WHERE id = ? AND game_id = ?",
+                (modifier, shop_id, game_id),
             )

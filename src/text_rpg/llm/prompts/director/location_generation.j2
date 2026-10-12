@@ -19,20 +19,15 @@ Generate a new location that:
 - Makes geographic sense given the source location and direction
 - Fits the region's theme and tone
 - Has interesting features for the player to explore
-- May or may not have inhabitants
+- Describes physical surroundings only; do not invent inhabitants, loose items,
+  treasure, services, quests, or usable exits. Those need separate game records.
 - Is appropriate for the player's level
 
 Respond in JSON only:
 {
   "name": "A distinctive location name",
-  "description": "3-4 sentences vividly describing the location",
-  "location_type": "one of: wilderness, dungeon, town, village, settlement, cave, ruins, forest, mountain, tavern, shop, temple, road",
-  "connections": [],
-  "entities": [],
-  "items": [],
-  "properties": {
-    "atmosphere": "Brief mood description",
-    "points_of_interest": ["1-3 notable features"],
-    "potential_encounters": ["1-2 things that might happen here"]
-  }
+  "description": "2-3 sentences describing physical surroundings",
+  "location_type": "one of: wilderness, cave, ruins, forest, mountain, road",
+  "atmosphere": "Brief mood description",
+  "discovery": "One concrete physical detail revealed by searching, without treasure, people, quests or new exits"
 }

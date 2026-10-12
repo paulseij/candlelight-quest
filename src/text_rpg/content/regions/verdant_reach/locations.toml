@@ -63,8 +63,17 @@ is_locked = false
 id = "thornfield_inn"
 name = "The Bramble and Boar Inn"
 region_id = "verdant_reach"
-description = "A warm and lively tavern with a roaring hearth. The smell of roasted meat and fresh bread fills the air. Adventurers, merchants, and locals mingle over mugs of ale."
+description = "A warm and lively tavern with a roaring hearth. The smell of roasted meat and fresh bread fills the air. Adventurers, merchants, and locals mingle over mugs of ale. A wooden shutter beside the hearth overlooks the village square."
 location_type = "tavern"
+
+[[locations.properties.interactables]]
+id = "bramble_boar_shutter"
+name = "wooden shutter"
+[locations.properties.interactables.state]
+description = "A wooden shutter beside the hearth overlooks the village square."
+operations = ["inspect", "open", "close"]
+open = false
+
 
 [[locations.connections]]
 target_location_id = "thornfield_village"

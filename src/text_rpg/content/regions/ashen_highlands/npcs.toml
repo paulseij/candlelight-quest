@@ -121,6 +121,7 @@ late_night = "cinderhold_tavern"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "lantern", "rations"]
 disliked_gifts = ["arcane_dust", "spider_silk"]
+quest_hook = "Something collapsed the new tunnel and killed two of my miners — whatever's down there is still digging"
 
 [[npcs.attacks]]
 name = "Miner's Pick"
@@ -164,6 +165,7 @@ late_night = "cinderhold_gate"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "rations"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "Bandits have set up camp on the highland road, ambushing supply caravans headed for Cinderhold"
 
 [[npcs.attacks]]
 name = "Greatsword"

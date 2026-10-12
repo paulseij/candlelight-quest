@@ -37,6 +37,7 @@ late_night = "planar_gate"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "arcane_dust"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "The planar boundaries are weakening — creatures from other planes are slipping through tears in the Veil"
 
 [[npcs.attacks]]
 name = "Planar Blade"
@@ -81,6 +82,7 @@ late_night = "fey_court_embassy"
 [npcs.properties]
 preferred_gifts = ["moonpetal", "enchanted_thread", "arcane_dust"]
 disliked_gifts = ["iron_ingot", "torch"]
+revival_resources = { method = "fey_bargain", charges = 1, materials_gp = 1000, offers_service = true, price_gp = 1500, ready_at = 0 }
 
 [[npcs.attacks]]
 name = "Fey Charm"
@@ -169,6 +171,7 @@ late_night = "elemental_fire_pocket"
 [npcs.properties]
 preferred_gifts = ["arcane_dust", "dragon_scale_fragment"]
 disliked_gifts = ["healing_herb", "rations"]
+quest_hook = "A frost elemental has invaded my domain and is disrupting the balance of the fire pocket — prove your worth by driving it out"
 
 [[npcs.attacks]]
 name = "Primal Fire"
@@ -301,6 +304,7 @@ late_night = "the_convergence"
 [npcs.properties]
 preferred_gifts = ["soul_gem", "arcane_dust"]
 disliked_gifts = ["rations", "torch"]
+quest_hook = "A thread of reality has come undone at the convergence — if it unravels further, the planes themselves will bleed together"
 
 [[npcs.attacks]]
 name = "Reality Tear"

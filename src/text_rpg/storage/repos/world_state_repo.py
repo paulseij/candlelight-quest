@@ -34,9 +34,10 @@ def _upsert(conn: Any, table: str, data: dict) -> None:
     columns = ", ".join(data.keys())
     placeholders = ", ".join("?" for _ in data)
     updates = ", ".join(f"{k} = excluded.{k}" for k in data)
+    conflict = "game_id, id" if table in {"regions", "quests"} else "id"
     sql = (
         f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) "
-        f"ON CONFLICT(id) DO UPDATE SET {updates}"
+        f"ON CONFLICT({conflict}) DO UPDATE SET {updates}"
     )
     conn.execute(sql, list(data.values()))
 

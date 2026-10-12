@@ -362,8 +362,8 @@ classes = ["cleric"]
 casting_time = "action"
 range = 0
 duration = "instantaneous"
-components = ["V", "S"]
-description = "You touch a creature that has died within the last minute. That creature returns to life with 1 hit point."
+components = ["V", "S", "M"]
+description = "Restore a willing creature that died within one minute to 1 HP. Consumes a diamond worth at least 300 gp and a spell slot of level 3 or higher. Cannot restore missing vital organs or reverse old age."
 [spells.mechanics]
 type = "utility"
 effect = "revivify"

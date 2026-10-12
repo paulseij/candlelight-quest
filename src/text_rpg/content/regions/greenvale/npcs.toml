@@ -37,6 +37,7 @@ late_night = "millhaven_square"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "rations"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "Bandits have been raiding grain shipments along the west road, threatening Millhaven's food supply"
 
 [[npcs.attacks]]
 name = "Walking Cane"
@@ -295,6 +296,7 @@ late_night = "hillcrest_watchtower"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "rations"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "A bandit camp has been spotted in the hills — they've been growing bolder and striking closer to town"
 
 [[npcs.attacks]]
 name = "Longsword"

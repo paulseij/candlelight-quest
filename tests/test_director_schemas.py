@@ -116,7 +116,9 @@ class TestNPCScaling:
         from text_rpg.systems.director.director import _scale_npc_to_player
         assert callable(_scale_npc_to_player)
 
-    def test_scales_level(self):
+    def test_scales_level(self, monkeypatch):
+        # These assertions cover normal scaling, not the separate 2% rare spawn.
+        monkeypatch.setattr("random.random", lambda: 0.5)
         from text_rpg.systems.director.director import _scale_npc_to_player
         from text_rpg.systems.base import GameContext
 
@@ -170,7 +172,9 @@ class TestNPCScaling:
         result = _scale_npc_to_player(npc, ctx)
         assert result["hp_max"] >= 4
 
-    def test_no_region_id_uses_wide_range(self):
+    def test_no_region_id_uses_wide_range(self, monkeypatch):
+        # These assertions cover normal scaling, not the separate 2% rare spawn.
+        monkeypatch.setattr("random.random", lambda: 0.5)
         from text_rpg.systems.director.director import _scale_npc_to_player
         from text_rpg.systems.base import GameContext
 

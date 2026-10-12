@@ -78,9 +78,11 @@ class CombatSystem(GameSystem):
     def resolve(self, action: Action, context: GameContext) -> ActionResult:
         # Check for puzzle encounter
         if action.action_type.lower() == "puzzle":
-            encounter = action.parameters.get("encounter")
+            encounter = action.parameters.get("encounter") or self._find_encounter_for_combat(context)
             if encounter:
                 return self._resolve_puzzle(action, context, encounter)
+            return ActionResult(action_id=action.id, success=False,
+                                outcome_description="There is no unresolved puzzle at this location.")
 
         combat = context.combat_state
         if not combat or not combat.get("is_active"):
@@ -91,7 +93,7 @@ class CombatSystem(GameSystem):
             # First attack → initiate combat
             return self._initiate_combat(action, context)
         # Already in combat → resolve player turn, then NPC turns
-        return self._resolve_combat_turn(action, context)
+        return self._resolve_pending_opening(action, context)
 
     def get_available_actions(self, context: GameContext) -> list[dict]:
         if not context.combat_state or not context.combat_state.get("is_active"):
@@ -109,7 +111,12 @@ class CombatSystem(GameSystem):
 
     # -- Combat Initiation --
 
-    def _initiate_combat(self, action: Action, context: GameContext) -> ActionResult:
+    def begin_encounter(self, context: GameContext, enemy_id: str) -> ActionResult:
+        """Start hostile contact without inventing a player attack."""
+        return self._initiate_combat(Action(action_type="attack", actor_id=context.character["id"], target_id=enemy_id),
+                                     context, opening_attack=False)
+
+    def _initiate_combat(self, action: Action, context: GameContext, opening_attack: bool = True) -> ActionResult:
         """Roll initiative for all combatants, create combat state, resolve first exchange."""
         target = self._find_target(action.target_id, context)
         if not target:
@@ -180,7 +187,13 @@ class CombatSystem(GameSystem):
         player_id = context.character["id"]
 
         # If player goes first, resolve their attack action
-        if first_id == player_id:
+        if not opening_attack:
+            mutations = []
+            xp = 0
+            self._get_combatant(combat, player_id)["opening_pending"] = True
+            order = "You have initiative." if first_id == player_id else "The enemy has initiative and will act before your chosen action."
+            outcome = f"Combat begins! {order} Choose an action: attack, dodge, cast a spell, or flee. No attacks have resolved yet."
+        elif first_id == player_id:
             player_result = self._resolve_player_attack(action, target, context, combat)
             mutations = player_result["mutations"]
             dice_rolls.extend(player_result["dice_rolls"])
@@ -201,13 +214,18 @@ class CombatSystem(GameSystem):
             mutations: list[StateMutation] = []
             xp = 0
 
-            npc_results = self._resolve_all_npc_turns(combat, context)
+            npc_results = self._resolve_all_npc_turns(combat, context, stop_at_player=True)
             mutations.extend(npc_results["mutations"])
             dice_rolls.extend(npc_results["dice_rolls"])
             events.extend(npc_results["events"])
             if npc_results["description"]:
                 outcome += npc_results["description"]
-            outcome += "\nYour turn — choose your action."
+            if self._get_combatant_hp(combat, player_id) > 0:
+                outcome += "\nYour turn — choose your action."
+
+        # The next input belongs to the player after the opening exchange.
+        if player_id in combat["turn_order"]:
+            combat["current_turn_index"] = combat["turn_order"].index(player_id)
 
         # Check combat end
         end_result = self._check_combat_end(combat, context)
@@ -233,7 +251,42 @@ class CombatSystem(GameSystem):
 
     # -- Turn Resolution --
 
-    def _resolve_combat_turn(self, action: Action, context: GameContext) -> ActionResult:
+    def _resolve_pending_opening(self, action: Action, context: GameContext) -> ActionResult:
+        """Collect the player's opening choice before any hostile damage."""
+        combat = context.combat_state
+        player = self._get_combatant(combat, context.character["id"])
+        if not player or not player.get("opening_pending"):
+            return self._resolve_combat_turn(action, context)
+        if action.action_type in {"attack", "1"} and not self._find_combat_target(action.target_id, context, combat):
+            return ActionResult(action_id=action.id, outcome_description="Choose a visible enemy to attack.")
+        if action.action_type in {"2", "combat_spell", "cast_spell", "3", "combat_item", "use_item"} and not (action.target_id or action.parameters.get("spell_name") or action.parameters.get("item_name")):
+            prompt = self._prompt_spell_list(context) if action.action_type in {"2", "combat_spell", "cast_spell"} else self._prompt_item_list(context)
+            return ActionResult(action_id=action.id, outcome_description=prompt["description"])
+        player["opening_pending"] = False
+        order = combat["turn_order"]
+        before_player = set(order[:order.index(context.character["id"])])
+        opening = self._resolve_all_npc_turns(combat, context, stop_at_player=True)
+        end = self._check_combat_end(combat, context)
+        if end:
+            self._end_combat(combat)
+            return ActionResult(action_id=action.id, success=True,
+                outcome_description="\n".join(filter(None, [opening["description"], end["description"]])),
+                dice_rolls=opening["dice_rolls"], state_mutations=opening["mutations"] + end.get("mutations", []),
+                events=opening["events"] + end.get("events", []), xp_gained=end.get("xp", 0))
+        # Actions such as healing must see damage from the opening exchange.
+        context.character = dict(context.character)
+        for mutation in opening["mutations"]:
+            if mutation.target_type == "character" and mutation.target_id == context.character["id"]:
+                context.character[mutation.field] = mutation.new_value
+        self._save_combat_state(combat)
+        result = self._resolve_combat_turn(action, context, skip_npcs=before_player)
+        result.dice_rolls = opening["dice_rolls"] + result.dice_rolls
+        result.state_mutations = opening["mutations"] + result.state_mutations
+        result.events = opening["events"] + result.events
+        result.outcome_description = "\n".join(filter(None, [opening["description"], result.outcome_description]))
+        return result
+
+    def _resolve_combat_turn(self, action: Action, context: GameContext, skip_npcs: set[str] | None = None) -> ActionResult:
         """Resolve the player's chosen action, then all NPC turns."""
         combat = context.combat_state
         action_type = action.action_type.lower()
@@ -338,7 +391,7 @@ class CombatSystem(GameSystem):
             )
 
         # Resolve NPC turns
-        npc_results = self._resolve_all_npc_turns(combat, context)
+        npc_results = self._resolve_all_npc_turns(combat, context, skip_ids=skip_npcs)
         mutations.extend(npc_results["mutations"])
         dice_rolls.extend(npc_results["dice_rolls"])
         events.extend(npc_results["events"])
@@ -521,6 +574,11 @@ class CombatSystem(GameSystem):
         if success:
             desc = f"You successfully flee from combat! (Roll: {roll_result.total} vs DC {dc})"
             events.append({"event_type": "COMBAT_FLEE", "description": "Successfully fled from combat."})
+            events.append({
+                "event_type": "COMBAT_END", "description": "Combat ended when the player escaped.",
+                "location_id": context.location.get("id"),
+                "mechanical_details": {"result": "fled"},
+            })
         else:
             desc = f"You fail to escape! (Roll: {roll_result.total} vs DC {dc}) The enemies block your retreat."
             events.append({"event_type": "COMBAT_FLEE_FAIL", "description": "Failed to flee from combat."})
@@ -653,6 +711,7 @@ class CombatSystem(GameSystem):
         # Build a cast_spell action for the SpellcastingSystem
         spell_action = Action(
             id=action.id,
+            actor_id=action.actor_id,
             action_type="cast_spell",
             target_id=spell_name,
             parameters=action.parameters,
@@ -667,6 +726,19 @@ class CombatSystem(GameSystem):
                 # Check if enemy was killed
                 if mut.target_type == "entity" and mut.new_value <= 0:
                     self._mark_combatant_defeated(combat, mut.target_id)
+
+        for event in result.events:
+            if event.get('event_type') == 'REVIVAL':
+                target_id = event['target_id']
+                hp = event['mechanical_details']['restored_hp']
+                self._set_combatant_hp(combat, target_id, hp)
+                combatant = self._get_combatant(combat, target_id)
+                if combatant:
+                    combatant['is_active'] = True
+                # Subsequent actors in this round must see the revived person.
+                for entity in context.entities:
+                    if entity['id'] == target_id:
+                        entity['is_alive'], entity['hp_current'] = True, hp
 
         return {
             "success": result.success,
@@ -731,6 +803,7 @@ class CombatSystem(GameSystem):
         inv_system = InventorySystem()
         item_action = Action(
             id=action.id,
+            actor_id=action.actor_id,
             action_type="use_item",
             target_id=item_name,
             parameters=action.parameters,
@@ -1011,7 +1084,7 @@ class CombatSystem(GameSystem):
 
     # -- NPC Turn Resolution --
 
-    def _resolve_all_npc_turns(self, combat: dict, context: GameContext) -> dict:
+    def _resolve_all_npc_turns(self, combat: dict, context: GameContext, stop_at_player: bool = False, skip_ids: set[str] | None = None) -> dict:
         """Resolve all non-player turns (enemies and companions). Returns combined results."""
         mutations: list[StateMutation] = []
         dice_rolls: list[DiceRoll] = []
@@ -1022,6 +1095,12 @@ class CombatSystem(GameSystem):
         player_combatant = self._get_combatant(combat, player_id)
 
         for eid in combat.get("turn_order", []):
+            if self._get_combatant_hp(combat, player_id) <= 0:
+                break
+            if skip_ids and eid in skip_ids:
+                continue
+            if stop_at_player and eid == player_id:
+                break
             combatant = self._get_combatant(combat, eid)
             if not combatant or combatant.get("combatant_type") == "player":
                 continue
@@ -1083,6 +1162,7 @@ class CombatSystem(GameSystem):
     ) -> dict:
         """Resolve an NPC attacking the player."""
         npc_name = npc.get("name", "Enemy")
+        attack_spec: dict[str, Any] = {}
 
         # Get NPC attack bonus from entity data
         npc_entity = self._find_entity_for_combatant(npc, context)
@@ -1093,10 +1173,13 @@ class CombatSystem(GameSystem):
             atk_bonus = max(str_mod, dex_mod) + 2  # Assume +2 proficiency
 
             # Check for attacks array for damage dice
-            attacks = safe_json(npc_entity.get("attacks"), [])
+            attacks = safe_json(npc.get("attacks"), []) or safe_json(npc_entity.get("attacks"), [])
             if attacks and isinstance(attacks[0], dict):
-                dmg_dice = attacks[0].get("damage_dice", "1d6")
-                dmg_mod = attacks[0].get("damage_bonus", max(str_mod, dex_mod))
+                attack_index = int(npc.get("next_attack_index", 0)) % len(attacks)
+                attack_spec = attacks[attack_index]
+                npc["next_attack_index"] = (attack_index + 1) % len(attacks)
+                dmg_dice = attack_spec.get("damage_dice", "1d6")
+                dmg_mod = attack_spec.get("damage_bonus", max(str_mod, dex_mod))
             else:
                 dmg_dice = "1d6"
                 dmg_mod = max(str_mod, dex_mod)
@@ -1135,11 +1218,7 @@ class CombatSystem(GameSystem):
             dmg_result = damage_roll(dmg_dice, dmg_mod, is_critical)
 
             # Determine NPC's damage type for resistance check
-            npc_dmg_type_raw = ""
-            if npc_entity:
-                npc_attacks_raw = safe_json(npc_entity.get("attacks"), [])
-                if npc_attacks_raw and isinstance(npc_attacks_raw[0], dict):
-                    npc_dmg_type_raw = npc_attacks_raw[0].get("damage_type", "")
+            npc_dmg_type_raw = attack_spec.get("damage_type", "")
 
             # Apply player's resistance/vulnerability/immunity
             char_props = safe_json(context.character.get("properties"), {}) or {}
@@ -1170,7 +1249,9 @@ class CombatSystem(GameSystem):
 
             crit = " CRITICAL HIT!" if is_critical else ""
             resist_text = f" ({npc_dmg_label})" if npc_dmg_label != "normal" else ""
-            desc = f"{npc_name} attacks you and hits!{crit} {effective_npc_dmg} damage.{resist_text}"
+            npc_attack_name = attack_spec.get("name", "attack")
+            desc = (f"{npc_name} uses {npc_attack_name} and hits!{crit} "
+                    f"{effective_npc_dmg} damage.{resist_text}")
             events.append({
                 "event_type": "ATTACK",
                 "description": f"{npc_name} attacks {context.character['name']} for {effective_npc_dmg} damage.",
@@ -1178,7 +1259,7 @@ class CombatSystem(GameSystem):
                 "mechanical_details": {
                     "damage": effective_npc_dmg, "critical": is_critical,
                     "npc_attack": True, "attack_style": "melee",
-                    "damage_modifier": npc_dmg_label,
+                    "damage_modifier": npc_dmg_label, "attack_name": npc_attack_name,
                 },
             })
 
@@ -1205,11 +1286,6 @@ class CombatSystem(GameSystem):
                 })
 
             # Narrative prose from LLM
-            npc_attack_name = "attack"
-            if npc_entity:
-                npc_attacks_for_narration = safe_json(npc_entity.get("attacks"), [])
-                if npc_attacks_for_narration and isinstance(npc_attacks_for_narration[0], dict):
-                    npc_attack_name = npc_attacks_for_narration[0].get("name", "attack")
             narration = self._narrate_attack(
                 attacker_name=npc_name, attacker_type="enemy",
                 defender_name=context.character["name"], hit=True, critical=is_critical,
@@ -1220,19 +1296,20 @@ class CombatSystem(GameSystem):
                 desc = narration
 
             if new_hp <= 0:
-                if not narration:
-                    desc += " You have been defeated!"
                 events.append({
                     "event_type": "PLAYER_DEFEAT",
                     "description": f"{context.character['name']} has been defeated!",
                     "target_id": char_id,
                 })
         else:
-            desc = f"{npc_name} attacks you and misses! (Roll: {atk_result.total} vs AC {target_ac})"
+            npc_attack_name = attack_spec.get("name", "attack")
+            desc = (f"{npc_name} uses {npc_attack_name} and misses! "
+                    f"(Roll: {atk_result.total} vs AC {target_ac})")
             narration = self._narrate_attack(
                 attacker_name=npc_name, attacker_type="enemy",
                 defender_name=context.character["name"], hit=False, critical=False,
-                damage=0, damage_type="", defeated=False,
+                damage=0, damage_type=attack_spec.get("damage_type", ""), defeated=False,
+                attack_name=npc_attack_name,
             )
             if narration:
                 desc = narration
@@ -1240,7 +1317,8 @@ class CombatSystem(GameSystem):
                 "event_type": "ATTACK",
                 "description": f"{npc_name} attacks {context.character['name']} and misses.",
                 "actor_id": npc.get("entity_id", ""), "target_id": char_id,
-                "mechanical_details": {"hit": False, "npc_attack": True, "attack_style": "melee"},
+                "mechanical_details": {"hit": False, "npc_attack": True, "attack_style": "melee",
+                                       "attack_name": npc_attack_name},
             })
 
         # Clear dodging after being attacked
@@ -1364,6 +1442,26 @@ class CombatSystem(GameSystem):
 
             # Generate loot drops
             loot_mutations, loot_desc = self._generate_loot(combat, context)
+            defeated_names = [
+                c.get("name", "enemy") for c in combat.get("combatants", [])
+                if c.get("combatant_type") == "enemy" and
+                (c.get("hp", {}).get("current", 0) if isinstance(c.get("hp"), dict) else 0) <= 0
+            ]
+            opponents = [c.get("name", "enemy") for c in combat.get("combatants", [])
+                         if c.get("combatant_type") == "enemy"]
+            location_props = dict(safe_json(context.location.get("properties"), {}))
+            battles = list(location_props.get("battle_history", []))
+            battles.append({
+                "world_time": context.world_time,
+                "outcome": "victory",
+                "defeated": defeated_names,
+                "opponents": opponents,
+            })
+            location_props["battle_history"] = battles[-8:]
+            loot_mutations.append(StateMutation(
+                target_type="location", target_id=context.location["id"], field="properties",
+                old_value=context.location.get("properties"), new_value=location_props,
+            ))
 
             desc = "Victory! All enemies have been defeated!"
             if loot_desc:
@@ -1374,7 +1472,11 @@ class CombatSystem(GameSystem):
                 "result": "victory",
                 "xp": total_xp,
                 "mutations": loot_mutations,
-                "events": [{"event_type": "COMBAT_END", "description": "Combat ended in victory."}],
+                "events": [{
+                    "event_type": "COMBAT_END", "description": "Combat ended in victory.",
+                    "location_id": context.location["id"],
+                    "mechanical_details": {"result": "victory", "defeated": defeated_names},
+                }],
             }
 
         if player_hp <= 0:
@@ -1512,8 +1614,9 @@ class CombatSystem(GameSystem):
                     name = c.get("name", "").lower()
                     enemy_names.add(name)
 
-            # Load encounters from region
-            region_data = load_region("verdant_reach")
+            # Load encounters from the current region
+            region_id = context.location.get("region_id") or "verdant_reach"
+            region_data = load_region(region_id)
             encounters = region_data.get("encounters", [])
 
             for enc in encounters:
@@ -1669,7 +1772,8 @@ class CombatSystem(GameSystem):
         weapon_id = char.get("equipped_weapon_id")
         if not weapon_id:
             return None
-        all_items = load_all_items()
+        from text_rpg.systems.item_catalog import get_item_catalog
+        all_items = get_item_catalog(self._repos, char.get("game_id"), char.get("id"))
         return all_items.get(weapon_id)
 
     def _get_attack_bonus(self, char: dict) -> int:
@@ -1756,6 +1860,9 @@ class CombatSystem(GameSystem):
                         "hp": {"current": e.get("hp_current", 10), "max": e.get("hp_max", 10), "temp": 0},
                         "ac": e.get("ac", 10), "is_active": True, "conditions": [], "has_acted": False,
                         "challenge_rating": e.get("challenge_rating", e.get("level", 1)),
+                        "attacks": safe_json(e.get("attacks"), []),
+                        "behaviors": safe_json(e.get("behaviors"), []),
+                        "next_attack_index": 0,
                     })
         init_pairs = [(c["entity_id"], c["initiative"]) for c in combatants]
         turn_order = determine_turn_order(init_pairs)
@@ -1773,29 +1880,10 @@ class CombatSystem(GameSystem):
         defeated: bool, attack_name: str = "weapon strike",
         wound: str | None = None, location_desc: str | None = None,
     ) -> str | None:
-        """Generate narrative prose for a combat attack via LLM. Returns None on failure."""
-        if not self._llm:
-            return None
-        try:
-            env = _get_jinja()
-            template = env.get_template("combat_narration.j2")
-            prompt = template.render(
-                attacker_name=attacker_name,
-                attacker_type=attacker_type,
-                defender_name=defender_name,
-                attack_name=attack_name,
-                hit=hit,
-                critical=critical,
-                damage=damage,
-                damage_type=damage_type,
-                defeated=defeated,
-                wound=wound,
-                location_desc=location_desc,
-            )
-            return self._llm.generate(prompt, temperature=0.9, max_tokens=128).strip()
-        except Exception as e:
-            logger.warning(f"Combat narration failed: {e}")
-            return None
+        """Use the engine's immediate hit/miss/damage text for combat."""
+        # Per-attack generations serialize a round behind several model calls.
+        # Returning None selects the existing authoritative combat description.
+        return None
 
     # -- Puzzle Encounter Resolution --
 
@@ -1806,6 +1894,43 @@ class CombatSystem(GameSystem):
         puzzle = encounter.get("puzzle", {})
         puzzle_type = puzzle.get("puzzle_type", "lock")
         enc_desc = encounter.get("description", "You face a puzzle.")
+        props = dict(safe_json(context.location.get('properties'), {}))
+        encounter_id = encounter.get('id', '')
+        states = dict(props.get('puzzle_states', {}))
+        state = dict(states.get(encounter_id, {}))
+        if state.get('solved'):
+            return ActionResult(action_id=action.id, success=False,
+                                outcome_description=f"{encounter.get('name', 'This puzzle')} is already solved.")
+        attempts = dict(state.get('attempts', {}))
+        actor_id = context.character.get('id', '')
+        level = int(context.character.get('level', 1))
+        attempt = dict(attempts.get(actor_id, {}))
+        if attempt.get('level') == level and int(attempt.get('count', 0)) >= 3:
+            return ActionResult(action_id=action.id, success=False,
+                                outcome_description="You have exhausted your useful approaches at your current level. Return after gaining a level.")
+
+        def persist_result(result: ActionResult, succeeded: bool) -> ActionResult:
+            latest = dict(safe_json(context.location.get('properties'), {}))
+            latest_states = dict(latest.get('puzzle_states', {}))
+            latest_state = dict(latest_states.get(encounter_id, {}))
+            latest_attempts = dict(latest_state.get('attempts', {}))
+            current = dict(latest_attempts.get(actor_id, {}))
+            count = int(current.get('count', 0)) + 1 if current.get('level') == level else 1
+            latest_attempts[actor_id] = {'level': level, 'count': count}
+            latest_state.update({'attempts': latest_attempts, 'solved': bool(succeeded),
+                                 'solved_at': context.world_time if succeeded else None})
+            latest_states[encounter_id] = latest_state
+            latest['puzzle_states'] = latest_states
+            if succeeded:
+                latest.pop('active_puzzle', None)
+            result.state_mutations.append(StateMutation(
+                target_type='location', target_id=context.location['id'], field='properties',
+                old_value=context.location.get('properties'), new_value=latest,
+            ))
+            for event in result.events:
+                event.setdefault('location_id', context.location['id'])
+                event.setdefault('mechanical_details', {})['encounter_id'] = encounter_id
+            return result
 
         # For riddle type with LLM, check if player gave the right answer
         if puzzle_type == "riddle" and self._llm:
@@ -1821,20 +1946,24 @@ class CombatSystem(GameSystem):
                     desc = f"{enc_desc}\n\nYou speak the answer: \"{player_answer}\".\nThe door groans open, revealing treasure beyond!"
                     if loot_desc:
                         desc += f"\n{loot_desc}"
-                    return ActionResult(
+                    return persist_result(ActionResult(
                         action_id=action.id, success=True,
                         outcome_description=desc,
                         state_mutations=mutations,
                         xp_gained=reward["xp"],
                         events=[{"event_type": "PUZZLE_SOLVED", "description": f"Solved: {encounter.get('name', 'puzzle')}"}],
-                    )
+                    ), True)
 
         result = evaluate_puzzle_attempt(
             puzzle=puzzle,
             action_description=action.raw_input or "",
             character=context.character,
-            inventory=context.inventory,
+            inventory=safe_json((context.inventory or {}).get('items'), []),
         )
+
+        if result.get('missing_item'):
+            return ActionResult(action_id=action.id, success=False,
+                                outcome_description=f"{enc_desc}\n\n{result['description']}")
 
         dice_rolls = []
         if result.get("roll_result"):
@@ -1882,14 +2011,14 @@ class CombatSystem(GameSystem):
                 events.append({"event_type": "TRAP_DAMAGE", "description": f"Took {trap_dmg} trap damage."})
             events.append({"event_type": "PUZZLE_FAILED", "description": f"Failed: {encounter.get('name', 'puzzle')}"})
 
-        return ActionResult(
+        return persist_result(ActionResult(
             action_id=action.id, success=result["success"],
             outcome_description=desc,
             dice_rolls=dice_rolls,
             state_mutations=mutations,
             events=events,
             xp_gained=xp,
-        )
+        ), result["success"])
 
     def _generate_puzzle_loot(self, encounter: dict, context: GameContext) -> tuple[list[StateMutation], str]:
         """Generate loot for solved puzzles. Reuses loot table format."""
@@ -1941,8 +2070,16 @@ class CombatSystem(GameSystem):
         """Find the encounter definition matching the current combat."""
         try:
             from text_rpg.content.loader import load_region
-            region_data = load_region("verdant_reach")
+            region_id = context.location.get("region_id") or "verdant_reach"
+            region_data = load_region(region_id)
             location_id = context.location.get("id", "")
+            active = safe_json(context.location.get('properties'), {}).get('active_puzzle')
+            if active:
+                return next((enc for enc in region_data.get('encounters', [])
+                             if enc.get('id') == active.get('encounter_id') and
+                             location_id in enc.get('location_ids', [])), None)
+            if not (context.combat_state and context.combat_state.get('is_active')):
+                return None
             for enc in region_data.get("encounters", []):
                 locs = enc.get("location_ids", [])
                 if location_id in locs:

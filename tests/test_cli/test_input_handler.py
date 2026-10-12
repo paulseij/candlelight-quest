@@ -36,6 +36,10 @@ class TestMetaCommands:
         ("q", "quit"),
         ("quests", "quests"),
         ("journal", "quests"),
+        ("traits", "traits"),
+        ("perks", "traits"),
+        ("passives", "traits"),
+        ("passive abilities", "traits"),
         ("reputation", "reputation"),
         ("rep", "reputation"),
         ("factions", "reputation"),
@@ -47,7 +51,6 @@ class TestMetaCommands:
         ("spells", "spells"),
         ("spellbook", "spells"),
         ("rewind", "rewind"),
-        ("go back", "rewind"),
         ("time travel", "rewind"),
         ("undo", "rewind"),
         ("home", "home"),
@@ -85,6 +88,12 @@ class TestMovement:
         assert handler.classify("up")["target"] == "up"
         assert handler.classify("down")["target"] == "down"
 
+    @pytest.mark.parametrize("raw", ["options", "suggest actions", "what can I do here?", "what should I do"])
+    def test_contextual_options(self, handler, raw):
+        result = handler.classify(raw)
+        assert result["action_type"] == "options"
+        assert result["is_meta"] is False
+
 
 class TestCombatActions:
     @pytest.mark.parametrize("raw, expected_action", [
@@ -120,6 +129,7 @@ class TestCombatActions:
         ("escape", "flee"),
         ("retreat", "flee"),
         ("disengage", "disengage"),
+        ("grapple goblin", "grapple"),
     ])
     def test_combat_keywords(self, handler, raw, expected_action):
         result = handler.classify(raw)

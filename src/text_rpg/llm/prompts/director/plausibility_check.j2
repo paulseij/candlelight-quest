@@ -26,12 +26,12 @@ Evaluate the plausibility of this action given ALL context above. Consider:
 - Did recent events change the situation?
 - Is this something a person of this class/race could attempt?
 
+Do NOT describe the outcome — the dice have not been rolled yet. Only assess.
+
 Respond in JSON only:
 {
-  "plausibility": 0.0 to 1.0,
+  "plausibility": 0.001 to 1.0,
   "skill": "the most relevant skill (e.g. athletics, persuasion, arcana)",
   "ability": "the governing ability score (strength, dexterity, constitution, intelligence, wisdom, charisma)",
-  "reasoning": "Brief explanation of why this plausibility score",
-  "success_description": "What happens if the player succeeds (2-3 sentences, vivid prose)",
-  "failure_description": "What happens if the player fails (2-3 sentences, include a minor consequence)"
+  "reasoning": "Brief explanation of why this plausibility score"
 }

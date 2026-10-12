@@ -1,0 +1,2 @@
+{"input": "Is there a wizard nearby?", "plan": {"operation": "list_people", "object_id": null, "item_id": null, "person_reference": "wizard"}, "seconds": 7.097, "pass": true, "outcome": "Nobody here matches that name or role.\nPeople nearby:\n- Harbormaster Kael \u2014 harbormaster\n- Captain Mora \u2014 merchant captain\nChoose someone by name, for example: talk to Harbormaster Kael"}
+{"passed": 1, "total": 1, "note": "Development diagnostics, not held-out accuracy or a guarantee for all paraphrases."}

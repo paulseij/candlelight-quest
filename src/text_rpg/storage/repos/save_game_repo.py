@@ -92,6 +92,7 @@ class SaveGameRepo:
                 "prepared_spells",
                 "story_state",
                 "world_event_cooldowns",
+                "revival_offers",
             ):
                 conn.execute(f"DELETE FROM {table} WHERE game_id = ?", (game_id,))
 

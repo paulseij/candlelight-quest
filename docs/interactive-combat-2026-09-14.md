@@ -1,0 +1,9 @@
+# Interactive encounter opening — September 14, 2026
+
+Random encounters now announce enemies and initiative, persist a pending opening in the player combatant's JSON state, and return to the combat menu before any attacks occur. The player chooses an action; the opening then resolves in initiative order. Enemies with higher initiative act before the chosen action, so a lethal hit can still prevent that action from executing. This is an explicit choice-before-resolution flow, not immunity from damage or a change to initiative rolls.
+
+The pending choice survives reload. Free observation and opening the spell/item selection menu do not release enemy attacks. Invalid attack targets are rejected before the opening. Enemies that already acted before the player do not attack a second time at the end of that opening round. A lethal attack ends further NPC processing; the result does not invite a defeated player to take a turn. The engine reports defeat once in its final combat result.
+
+The terminal now displays an animated “Processing your turn…” status while the turn resolves, including model waits, and clears it on success or failure. Per-attack model narration has been disabled: combat uses immediate engine-generated hit, miss and damage descriptions. This removes serial prose-generation waits during rounds and keeps mechanical outcomes authoritative. NPC dialogue and freeform interpretation still use the local model. Duplicate compact dice summaries are suppressed when individual rolls are already displayed.
+
+Tests reproduce enemy-first initiative, a two-enemy lethal opening, saved pending choices, free spell-menu browsing, no damage on encounter entry, exactly one attack from a higher-initiative enemy after the player's choice, and idempotent request retries. The lethal test verifies combat ends and the player's selected action does not execute afterward. Test saves are temporary; Kami's actual lost gold and health have not been edited.

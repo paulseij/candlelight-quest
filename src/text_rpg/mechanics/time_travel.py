@@ -23,5 +23,5 @@ RESTORE_PRESETS: dict[str, RestoreConfig] = {
     "death": RestoreConfig(
         keep_player_stats=True, keep_inventory=False, keep_spells=True,
     ),
-    "full_reset": RestoreConfig(),
+    "full_reset": RestoreConfig(keep_player_stats=False, keep_inventory=False, keep_spells=False),
 }

@@ -52,6 +52,7 @@ class SystemRegistry:
         from text_rpg.systems.guild.system import GuildSystem
         from text_rpg.systems.spell_creation.system import SpellCreationSystem
         from text_rpg.systems.spellcasting.system import SpellcastingSystem
+        from text_rpg.systems.revival.system import RevivalSystem
 
         self.register(CombatSystem())
         self.register(ExplorationSystem())
@@ -60,6 +61,7 @@ class SystemRegistry:
         self.register(RestSystem())
         self.register(CraftingSystem())
         self.register(SpellcastingSystem())
+        self.register(RevivalSystem())
         self.register(SpellCreationSystem())
         self.register(ShopSystem())
         self.register(CompanionSystem())

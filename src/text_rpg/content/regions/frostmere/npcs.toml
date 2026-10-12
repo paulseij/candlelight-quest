@@ -169,6 +169,7 @@ late_night = "ranger_fort"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "beast_hide"]
 disliked_gifts = ["arcane_dust", "moonpetal"]
+quest_hook = "Frost trolls have been pushing south from the glacial rift, threatening the ranger outposts"
 
 [[npcs.attacks]]
 name = "Frost Longbow"
@@ -257,6 +258,7 @@ late_night = "under_ice_city"
 [npcs.properties]
 preferred_gifts = ["arcane_dust", "torch"]
 disliked_gifts = ["beast_hide", "rations"]
+quest_hook = "Strange glyphs in the under-ice ruins have begun glowing — something ancient is waking up down there"
 
 [[npcs.attacks]]
 name = "Ice Pick"
@@ -433,6 +435,7 @@ late_night = "ranger_fort"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "beast_hide"]
 disliked_gifts = ["moonpetal", "arcane_dust"]
+quest_hook = "A supply cache went missing on the northern route — the expedition team sent to find it hasn't returned"
 
 [[npcs.attacks]]
 name = "War Pick"

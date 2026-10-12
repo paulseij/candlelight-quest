@@ -31,6 +31,7 @@ _COOLDOWNS: dict[str, int] = {
     "region": 20,
     "arcane_location": 25,
     "guild": 20,
+    "bounty_hunter": 15,
 }
 
 
@@ -148,8 +149,28 @@ class Director:
                 })
                 return events
 
+        # 6d. Bounty hunters come for wanted players in the wilds
+        if self._can_generate("bounty_hunter", context.turn_number):
+            bounty_event = self._try_spawn_bounty_hunter(context, repos)
+            if bounty_event:
+                events.append(bounty_event)
+                self._last_generation["bounty_hunter"] = context.turn_number
+                return events
+
         # 7. Story progression — check story seed beats
-        story_events = self._check_story_progression(context, repos)
+        # The regional campaign owns long-form progression while active.
+        # Legacy seed stories can still run in regions without one, but must
+        # not inject a second unrelated plot into the same scene.
+        campaign_active = False
+        try:
+            from text_rpg.engine.campaign import CampaignRuntime
+            from text_rpg.storage.database import Database
+            if isinstance(getattr(repos.get('save_game'), 'db', None), Database):
+                story = CampaignRuntime(repos).get(context.game_id)
+                campaign_active = bool(story and story['status'] == 'active')
+        except Exception:
+            pass
+        story_events = [] if campaign_active else self._check_story_progression(context, repos)
         if story_events:
             events.extend(story_events)
 
@@ -189,24 +210,186 @@ class Director:
         context: GameContext,
         plausibility: dict,
         repos: dict[str, Any],
+        roll_total: int = 0,
+        dc: int = 10,
+        roll_succeeded: bool = True,
     ) -> ActionResult:
-        """Generate the outcome of a successful creative action.
+        """Resolve a creative action AFTER the roll into real, applied effects.
 
-        May produce new locations, items, or NPC reactions depending on context.
+        The LLM proposes typed effects from a closed menu; only effects that
+        survive validation are applied and recorded — narration and the event
+        ledger describe exactly what happened, nothing more.
+        Raises LLMUnavailableError when the provider is down.
         """
-        description = plausibility.get("success_description", "You succeed against the odds.")
+        from text_rpg.content.loader import load_all_items
+        from text_rpg.llm.errors import LLMMalformedOutputError
+        from text_rpg.mechanics.creative_effects import (
+            WorldFacts,
+            creative_budget,
+            effect_menu_text,
+            effects_to_mutations,
+            effects_to_summary,
+            validate_effects,
+        )
+        from text_rpg.systems.director.generators import generate_creative_outcome
+
+        def persistent_alteration():
+            """Build one bounded location mutation from a successful physical act."""
+            if not roll_succeeded:
+                return None, None
+            from text_rpg.engine.scene_detail import durable_scene_change
+            from text_rpg.models.action import StateMutation
+            change = durable_scene_change(
+                action.raw_input,
+                context.character.get("name", "The player"),
+                action.id,
+                context.world_time,
+                [entity.get("name", "") for entity in context.entities if entity.get("is_alive", True)],
+                " ".join((context.location.get("name", ""), context.location.get("description", ""))),
+            )
+            if not change:
+                return None, None
+            props = dict(safe_json(context.location.get("properties"), {}))
+            changes = [entry for entry in props.get("scene_changes", [])
+                       if isinstance(entry, dict) and entry.get("id") != change["id"]]
+            changes.append(change)
+            props["scene_changes"] = changes[-20:]
+            mutation = StateMutation(
+                target_type="location", target_id=context.location.get("id", ""),
+                field="properties", old_value=context.location.get("properties"), new_value=props,
+            )
+            return change, mutation
+
+        skill = plausibility.get("skill", "athletics")
+        level = context.character.get("level", 1)
+        char_id = context.character.get("id")
+
+        try:
+            catalog = load_all_items()
+        except Exception:
+            catalog = {}
+        location_items = [
+            i for i in safe_json(context.location.get("items"), []) if isinstance(i, str)
+        ]
+        inventory_ids = {
+            e.get("item_id", "") for e in safe_json((context.inventory or {}).get("items"), [])
+        }
+        alive_entities = {
+            e["id"]: e for e in context.entities if e.get("is_alive", True) and e.get("id")
+        }
+        exit_directions = {
+            c.get("direction", "").lower()
+            for c in safe_json(context.location.get("connections"), [])
+            if isinstance(c, dict)
+        }
+
+        facts = WorldFacts(
+            catalog_item_ids=set(catalog.keys()),
+            location_item_ids=set(location_items),
+            inventory_item_ids=inventory_ids,
+            present_entity_ids=set(alive_entities.keys()),
+            existing_exit_directions=exit_directions,
+            allowed_effects={"narrative_only"},
+        )
+
+        # Item candidates shown to the model: what's here plus a slice of the
+        # catalog (mundane items), so ids in gain_item are always real.
+        candidate_ids = location_items + sorted(inventory_ids) + sorted(catalog.keys())[:40]
+        available_items = ", ".join(dict.fromkeys(i for i in candidate_ids if i)) or "none"
+
+        budget = creative_budget(level)
+        # At present creative actions intentionally have no authority to mint
+        # loot, exits, creatures, healing, or social state. A second model call
+        # could therefore only return an effect that is discarded. Resolve the
+        # roll directly and keep the common local-model path responsive.
+        if facts.allowed_effects == {"narrative_only"}:
+            change, mutation = persistent_alteration()
+            if roll_succeeded:
+                text = (f"Your work leaves a lasting change here: {change['description']}." if change
+                        else f"You succeed at the attempt: {action.raw_input.strip()}")
+            else:
+                text = f"Your attempt fails: {action.raw_input.strip()}"
+            return ActionResult(
+                action_id=action.id,
+                success=roll_succeeded,
+                outcome_description=text,
+                state_mutations=[mutation] if mutation else [],
+                events=[{
+                    "event_type": "CREATIVE_ACTION" if roll_succeeded else "CREATIVE_ACTION_FAIL",
+                    "description": text,
+                    "actor_id": char_id,
+                    "location_id": context.location.get("id"),
+                    "mechanical_details": {"effects": [], "dc": dc, "roll": roll_total,
+                                           "scene_change": change,
+                                           "witness_ids": list(alive_entities)},
+                }],
+                xp_gained=0,
+            )
+        try:
+            proposal = generate_creative_outcome(
+                self.llm, action.raw_input, context,
+                skill=skill, roll_total=roll_total, dc=dc,
+                roll_succeeded=roll_succeeded,
+                available_items=available_items,
+                effect_menu=effect_menu_text(level),
+                budget=budget,
+            )
+        except LLMMalformedOutputError:
+            # Safe refusal: a true statement with no fabricated state.
+            change, mutation = persistent_alteration()
+            text = (f"Your work leaves a lasting change here: {change['description']}." if change
+                    else "No supported mechanical change occurs." if roll_succeeded
+                    else "Your attempt comes to nothing.")
+            return ActionResult(
+                action_id=action.id,
+                success=roll_succeeded,
+                outcome_description=text,
+                state_mutations=[mutation] if mutation else [],
+                events=[{
+                    "event_type": "CREATIVE_ACTION" if roll_succeeded else "CREATIVE_ACTION_FAIL",
+                    "description": f"Creative action: {action.raw_input} — {text}",
+                    "actor_id": char_id,
+                    "location_id": context.location.get("id"),
+                    "mechanical_details": {"scene_change": change} if change else {},
+                }],
+                xp_gained=0,
+            )
+
+        effects, dropped = validate_effects(
+            proposal.get("effects", []), facts, level, roll_succeeded,
+        )
+        if dropped:
+            logger.info(f"Creative effects dropped: {dropped}")
+
+        mutations = effects_to_mutations(effects, context.character, alive_entities)
+        change, change_mutation = persistent_alteration()
+        if change_mutation:
+            mutations.append(change_mutation)
+
+        extra_events: list[dict] = []
+
+        item_names = {iid: data.get("name", iid) for iid, data in catalog.items()}
+        entity_names = {eid: e.get("name", "Someone") for eid, e in alive_entities.items()}
+        factual = effects_to_summary(effects, item_names, entity_names)
+        change_text = f"Your work leaves a lasting change here: {change['description']}." if change else ""
+        outcome = " ".join(part for part in (factual, change_text) if part) or "No supported mechanical change occurs."
+        event_desc = outcome if (factual or change) else "Creative attempt produced no mechanical change."
         events = [{
-            "event_type": "CREATIVE_ACTION",
-            "description": f"Creative action: {action.raw_input} — {description}",
-            "actor_id": context.character.get("id"),
+            "event_type": "CREATIVE_ACTION" if roll_succeeded else "CREATIVE_ACTION_FAIL",
+            "description": event_desc,
+            "actor_id": char_id,
             "location_id": context.location.get("id"),
-        }]
+            "mechanical_details": {"effects": effects, "dc": dc, "roll": roll_total,
+                                   "scene_change": change},
+        }] + extra_events
 
         return ActionResult(
             action_id=action.id,
-            success=True,
-            outcome_description=description,
+            success=roll_succeeded,
+            outcome_description=outcome,
+            state_mutations=mutations,
             events=events,
+            xp_gained=0,
         )
 
     def generate_location_for_direction(
@@ -222,15 +405,21 @@ class Director:
         deep enough past content boundaries, new locations may belong to a
         different region.
         """
-        from text_rpg.systems.director.generators import generate_location
+        from text_rpg.systems.director.generators import generate_location, fallback_location
 
         try:
             location_data = generate_location(
                 self.llm, context, direction, context.location,
             )
+        except (ValueError, ConnectionError) as e:
+            logger.warning(f"Location generation failed; using a grounded outdoor site: {e}")
+            location_data = fallback_location(context.location, direction)
         except Exception as e:
-            logger.warning(f"Location generation failed: {e}")
-            return None
+            from text_rpg.llm.errors import LLMUnavailableError, LLMMalformedOutputError
+            if not isinstance(e, (LLMUnavailableError, LLMMalformedOutputError)):
+                raise
+            logger.warning(f"Location generation failed; using a grounded outdoor site: {e}")
+            location_data = fallback_location(context.location, direction)
 
         source_loc_id = context.location.get("id", "")
         new_loc_id = location_data["id"]
@@ -282,6 +471,24 @@ class Director:
                 "is_locked": False,
             })
             repos["location"].update_field(source_loc_id, context.game_id, "connections", src_conns)
+
+        # If we crossed into a freshly seeded content region, connect this
+        # border location onward to the region's entry settlement.
+        pending_entry = getattr(self, "_pending_region_entry", None)
+        if new_region_id != current_region_id and pending_entry and conn_repo:
+            try:
+                conn_repo.add_bidirectional(
+                    game_id=context.game_id,
+                    source_id=new_loc_id,
+                    target_id=pending_entry,
+                    direction="onward",
+                    reverse_direction="back",
+                    description="The road onward into the region",
+                    back_description=location_data.get("name", "the way back"),
+                )
+            except Exception as e:
+                logger.warning(f"Failed to connect border location to region entry: {e}")
+            self._pending_region_entry = None
 
         # Optionally generate NPCs for the new location
         self._populate_new_location(location_data, context, repos)
@@ -346,17 +553,153 @@ class Director:
             "location_id": context.location.get("id"),
         }
 
+    def _quest_candidates(self, context: GameContext, repos: dict[str, Any]) -> dict:
+        """Real-id sets that generated quest objectives must target."""
+        from text_rpg.content.loader import load_all_items, load_region
+
+        candidates: dict[str, set[str]] = {
+            "locations": set(), "npcs": set(), "entity_types": set(), "items": set(),
+        }
+        try:
+            for loc in repos["location"].get_all(context.game_id):
+                if loc.get("id"):
+                    candidates["locations"].add(loc["id"])
+        except Exception:
+            pass
+        try:
+            for entity in repos["entity"].get_by_game(context.game_id):
+                if not entity.get("is_alive", True):
+                    continue
+                if entity.get("entity_type") == "npc":
+                    candidates["npcs"].add(entity.get("id", ""))
+                elif entity.get("is_hostile") and entity.get("name"):
+                    candidates["entity_types"].add(entity["name"].lower().replace(" ", "_"))
+        except Exception:
+            pass
+        try:
+            region_id = context.location.get("region_id", "")
+            if region_id:
+                for enc in load_region(region_id).get("encounters", []):
+                    for ent in enc.get("entities", []):
+                        if ent.get("name"):
+                            candidates["entity_types"].add(ent["name"].lower().replace(" ", "_"))
+        except Exception:
+            pass
+        try:
+            candidates["items"] = set(load_all_items().keys())
+        except Exception:
+            pass
+        candidates["npcs"].discard("")
+        candidates["locations"].discard("")
+        return candidates
+
+    def _fallback_quest(self, npc: dict, context: GameContext) -> dict:
+        """Deterministic template quest built entirely from real ids."""
+        objectives = []
+        connections = safe_json(context.location.get("connections"), [])
+        target_loc = next(
+            (c.get("target_location_id") for c in connections
+             if isinstance(c, dict) and c.get("target_location_id")),
+            None,
+        )
+        if target_loc:
+            objectives.append({
+                "id": str(uuid.uuid4()),
+                "description": f"Scout the area {target_loc.replace('_', ' ')}",
+                "objective_type": "travel",
+                "target_location_id": target_loc,
+                "target_count": 1, "current_count": 0,
+                "is_complete": False, "negotiable": False,
+            })
+        objectives.append({
+            "id": str(uuid.uuid4()),
+            "description": f"Report back to {npc.get('name', 'the quest giver')}",
+            "objective_type": "talk",
+            "target_npc_id": npc.get("id", ""),
+            "target_count": 1, "current_count": 0,
+            "is_complete": False, "negotiable": False,
+        })
+        return {
+            "id": str(uuid.uuid4()),
+            "name": f"An Errand for {npc.get('name', 'a Stranger')}",
+            "description": (
+                f"{npc.get('name', 'Someone')} asks you to look into a small matter "
+                "nearby and report back."
+            ),
+            "status": "available",
+            "objectives": objectives,
+            "xp_reward": 50, "gold_reward": 10, "item_rewards": [],
+            "level_requirement": 1, "generated": True,
+            "npc_motivation": "Needs a reliable pair of hands.",
+            "completion_flexibility": "low",
+        }
+
+    def _try_spawn_bounty_hunter(
+        self, context: GameContext, repos: dict[str, Any]
+    ) -> dict | None:
+        """Spawn a hostile bounty hunter when the player's bounty runs high."""
+        rep_repo = repos.get("reputation")
+        if not rep_repo:
+            return None
+        try:
+            region_id = context.location.get("region_id", "")
+            if not region_id:
+                return None
+            bounty = rep_repo.get_bounty(context.game_id, region_id) or {}
+            bounty_amount = bounty.get("amount", 0)
+            if not triggers.should_spawn_bounty_hunter(context, bounty_amount):
+                return None
+
+            from text_rpg.systems.director.schemas import validate_npc
+
+            npc_data = validate_npc({
+                "name": "Bounty Hunter",
+                "description": (
+                    "A grim, well-armed tracker with a wanted notice bearing your "
+                    "likeness tucked into their belt."
+                ),
+                "is_hostile": True,
+                "attacks": [{"name": "Crossbow", "damage_dice": "1d8", "damage_type": "piercing"}],
+            })
+            npc_data = _scale_npc_to_player(npc_data, context)
+            npc_data["game_id"] = context.game_id
+            npc_data["location_id"] = context.location.get("id", "")
+            props = safe_json(npc_data.get("properties"), {})
+            props["bounty_hunter"] = True
+            props["bounty_amount"] = bounty_amount
+            npc_data["properties"] = props
+            repos["entity"].save(_serialize_entity(npc_data))
+
+            return {
+                "event_type": "GUARD_CONFRONTATION",
+                "description": (
+                    f"A bounty hunter steps onto the path, crossbow leveled. "
+                    f"The {bounty_amount} gold on your head has drawn the wrong kind of attention."
+                ),
+                "target_id": npc_data["id"],
+                "location_id": context.location.get("id"),
+                "mechanical_details": {"bounty_amount": bounty_amount},
+            }
+        except Exception as e:
+            logger.warning(f"Bounty hunter spawn failed: {e}")
+            return None
+
     def _try_prepare_quest(
         self, npc: dict, context: GameContext, repos: dict[str, Any]
     ) -> dict | None:
         """Generate a quest from an NPC's quest hook and save it."""
+        from text_rpg.llm.errors import LLMUnavailableError
         from text_rpg.systems.director.generators import generate_quest
 
+        candidates = self._quest_candidates(context, repos)
+        candidates["npcs"].add(npc.get("id", ""))
         try:
-            quest_data = generate_quest(self.llm, context, npc)
+            quest_data = generate_quest(self.llm, context, npc, candidates)
+        except LLMUnavailableError:
+            raise
         except Exception as e:
-            logger.warning(f"Quest generation failed: {e}")
-            return None
+            logger.warning(f"Quest generation failed, using template fallback: {e}")
+            quest_data = self._fallback_quest(npc, context)
 
         quest_data["game_id"] = context.game_id
         quest_data["quest_giver_id"] = npc.get("id", "")
@@ -393,7 +736,8 @@ class Director:
         from text_rpg.systems.director.generators import generate_follow_up_quest
 
         try:
-            quest_data = generate_follow_up_quest(self.llm, context, completed_quest)
+            candidates = self._quest_candidates(context, repos)
+            quest_data = generate_follow_up_quest(self.llm, context, completed_quest, candidates)
         except Exception as e:
             logger.warning(f"Follow-up quest generation failed: {e}")
             return None
@@ -524,14 +868,25 @@ class Director:
                 if loc.get("visited")
             }
 
-            # Prefer unvisited content regions
+            # Prefer unvisited content regions within reach of the player level
             unvisited = [
                 rid for rid in all_regions
-                if rid not in visited_regions and rid != current_region_id
+                if rid not in visited_regions
+                and rid != current_region_id
+                and all_regions[rid].get("level_range_min", 1) <= player_level + 2
             ]
             if unvisited:
                 chosen = random.choice(unvisited)
                 logger.info(f"Region crossing: {current_region_id} -> {chosen}")
+                # Seed the real region so the border leads somewhere populated
+                try:
+                    from text_rpg.content.region_seeder import seed_region
+
+                    result = seed_region(chosen, context.game_id, repos)
+                    self._pending_region_entry = result["entry_location_id"]
+                except Exception as e:
+                    logger.warning(f"Failed to seed crossed region {chosen}: {e}")
+                    self._pending_region_entry = None
                 return chosen
 
             # All content regions visited — this stays in current region
@@ -585,11 +940,35 @@ class Director:
         ]
 
         if unvisited_content:
-            # Pick the first unvisited content region and create a narrative hook
-            target_region_id = unvisited_content[0]
+            # Choose the unvisited content region closest to the player's level
+            def level_distance(rid: str) -> int:
+                meta = all_regions.get(rid, {})
+                return abs(meta.get("level_range_min", 1) - player_level)
+
+            target_region_id = min(unvisited_content, key=level_distance)
+
+            # Seed it into the DB and open a real road to its entry location
             try:
-                target_region = load_region(target_region_id)
-            except Exception:
+                from text_rpg.content.region_seeder import seed_region
+
+                result = seed_region(target_region_id, context.game_id, repos)
+                target_region = result["region"]
+                entry_loc_id = result["entry_location_id"]
+                conn_repo = repos.get("connection")
+                current_loc_id = context.location.get("id", "")
+                if conn_repo and entry_loc_id and current_loc_id:
+                    if not conn_repo.find_connection(context.game_id, current_loc_id, "beyond"):
+                        conn_repo.add_bidirectional(
+                            game_id=context.game_id,
+                            source_id=current_loc_id,
+                            target_id=entry_loc_id,
+                            direction="beyond",
+                            reverse_direction="back",
+                            description=f"Road to {target_region.get('name', 'new lands')}",
+                            back_description=context.location.get("name", "the way back"),
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to seed revealed region {target_region_id}: {e}")
                 return None
 
             self._last_generation["region"] = context.turn_number
@@ -597,7 +976,8 @@ class Director:
                 "event_type": "DIRECTOR_REGION_REVEAL",
                 "description": (
                     f"Travelers speak of lands beyond — {target_region.get('name', 'a distant region')}. "
-                    f"{target_region.get('description', '')[:200]}"
+                    f"{target_region.get('description', '')[:200]} "
+                    f"A road now leads beyond from here."
                 ),
                 "location_id": context.location.get("id"),
                 "mechanical_details": {
@@ -721,13 +1101,32 @@ class Director:
 
         try:
             factions = load_all_factions()
-            events = check_faction_goals(factions, context.turn_number)
+            ws = repos.get("world_state")
+
+            # Build per-goal last-resolved turns so goals fire on their own
+            # intervals instead of all at once when the director cooldown lapses.
+            last_checked: dict[str, int] = {}
+            if ws:
+                for faction_id, faction in factions.items():
+                    for goal in faction.get("goals", []):
+                        goal_key = f"{faction_id}_{goal.get('id', '')}"
+                        last_checked[goal_key] = ws.get_event_cooldown(
+                            context.game_id, f"faction_goal_{goal_key}"
+                        )
+
+            events = check_faction_goals(factions, context.turn_number, last_checked)
 
             for event in events:
                 details = event.get("mechanical_details", {})
                 effects = details.get("effects", [])
                 if effects:
                     apply_goal_effects(effects, context.game_id, repos)
+
+                if ws:
+                    goal_key = f"{details.get('faction_id', '')}_{details.get('goal_id', '')}"
+                    ws.set_event_cooldown(
+                        context.game_id, f"faction_goal_{goal_key}", context.turn_number
+                    )
 
                 # Index to RAG
                 try:
@@ -832,7 +1231,9 @@ class Director:
                 current_beat = story.get("current_beat", "hook")
                 nxt = next_beat(current_beat)
                 if not nxt:
-                    continue  # At resolution, wait for quest completion
+                    # At resolution — finish the story once its quests resolve
+                    events.extend(self._maybe_complete_story(story, seed, context, repos))
+                    continue
 
                 beat_def = seed.get(nxt, {})
                 if not beat_def:
@@ -977,6 +1378,98 @@ class Director:
 
         return events
 
+    def _maybe_complete_story(
+        self, story: dict, seed: dict, context: GameContext, repos: dict[str, Any],
+    ) -> list[dict]:
+        """Complete a story at its resolution beat once its quests resolve."""
+        quest_ids = safe_json(story.get("quest_ids"), [])
+        if not quest_ids:
+            return []
+
+        ws = repos["world_state"]
+        statuses = []
+        for quest_id in quest_ids:
+            quest = ws.get_quest(quest_id, context.game_id)
+            if quest:
+                statuses.append(quest.get("status", ""))
+        if not statuses or any(s in ("active", "available") for s in statuses):
+            return []  # Still in progress
+
+        succeeded = all(s == "completed" for s in statuses)
+        seed_id = story.get("seed_id", "")
+        seed_name = seed.get("name", seed_id)
+        ws.complete_story(context.game_id, seed_id, "completed" if succeeded else "failed")
+
+        resolution = seed.get("resolution", {})
+        effects = resolution.get("success_effects" if succeeded else "failure_effects", [])
+        self._apply_story_effects(effects, context, repos)
+
+        hints = resolution.get(
+            "success_narrator_hints" if succeeded else "failure_narrator_hints", [])
+        description = (
+            hints[0] if hints
+            else f"The story '{seed_name}' reaches its {'triumphant' if succeeded else 'bitter'} end."
+        )
+        return [{
+            "event_type": "STORY_BEAT",
+            "description": description,
+            "actor_id": context.character.get("id"),
+            "location_id": context.location.get("id"),
+            "mechanical_details": {
+                "story_name": seed_name,
+                "beat_name": "complete" if succeeded else "failed",
+                "seed_id": seed_id,
+            },
+        }]
+
+    def _apply_story_effects(
+        self, effects: list, context: GameContext, repos: dict[str, Any],
+    ) -> None:
+        """Apply story resolution effects. Only faction reputation is wired;
+        other effect types are logged and skipped (see plan follow-up)."""
+        rep_repo = repos.get("reputation")
+        for effect in effects or []:
+            if not isinstance(effect, dict):
+                continue
+            if effect.get("type") == "faction_rep" and rep_repo:
+                delta = effect.get("delta", 0)
+                faction_id = effect.get("faction_id", "")
+                if not faction_id:
+                    # Seeds use faction_role; map onto a current-region faction.
+                    role = effect.get("faction_role", "")
+                    faction_id = self._resolve_faction_for_role(role, context, repos)
+                if faction_id and delta:
+                    try:
+                        rep_repo.adjust_faction_rep(context.game_id, faction_id, delta)
+                    except Exception as e:
+                        logger.warning(f"Story faction effect failed: {e}")
+            else:
+                logger.info(f"Skipping unwired story effect type: {effect.get('type')}")
+
+    @staticmethod
+    def _resolve_faction_for_role(
+        role: str, context: GameContext, repos: dict[str, Any],
+    ) -> str:
+        """Best-effort mapping from a story role to a faction in the current region."""
+        if not role:
+            return ""
+        from text_rpg.content.loader import load_all_factions
+
+        region = context.location.get("region_id", "")
+        try:
+            factions = load_all_factions()
+        except Exception:
+            return ""
+        trade_roles = {"merchant", "farmer", "innkeeper", "trader"}
+        for fid, data in factions.items():
+            if region and data.get("region") != region:
+                continue
+            if role in fid:
+                return fid
+            if role in trade_roles and any(k in fid for k in ("merchant", "trade", "cooperative")):
+                return fid
+        return ""
+
     def _generate_story_quest(
         self,
         seed: dict,
@@ -1015,6 +1508,9 @@ class Director:
 
         try:
             # Use Director's quest generator with story context
+            candidates = self._quest_candidates(context, repos)
+            if quest_giver_id:
+                candidates["npcs"].add(quest_giver_id)
             quest_data = generate_quest(self.llm, context, {
                 "name": report_to_name,
                 "description": f"Quest giver for {seed_name}",
@@ -1024,7 +1520,7 @@ class Director:
                     "motivation": beat_desc,
                     "quest_hook": f"A {quest_type} task related to {target_name}. {seed.get('description_template', '')}",
                 }),
-            })
+            }, candidates)
         except Exception as e:
             logger.warning(f"Story quest generation failed: {e}")
             return None

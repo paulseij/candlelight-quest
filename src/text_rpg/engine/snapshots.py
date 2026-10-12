@@ -39,34 +39,90 @@ class StateSerializer:
             "world_state": json.dumps(self._capture_world(game_id)),
             "quest_state": json.dumps(self._capture_quests(game_id)),
             "social_state": json.dumps(self._capture_social(game_id)),
+            "metadata": json.dumps(self._capture_tables(game_id)),
         }
 
     def restore(self, game_id: str, snapshot: dict, config: RestoreConfig) -> None:
         """Restore game state from a snapshot based on config."""
-        # Always restore: world state (entities, locations)
-        self._restore_world(game_id, json.loads(snapshot["world_state"]))
-        self._restore_quests(game_id, json.loads(snapshot["quest_state"]))
+        if snapshot.get("game_id",game_id) != game_id:
+            raise ValueError("Snapshot belongs to a different save")
+        metadata = safe_json(snapshot.get("metadata"), {})
+        if metadata.get("version") != 2:
+            raise ValueError("This legacy snapshot does not contain complete world state. Create a new snapshot before rewinding.")
+        db = self.repos["save_game"].db
+        with db.transaction() as conn:
+            conn.execute("PRAGMA defer_foreign_keys=ON")
+            current = dict(conn.execute("SELECT * FROM games WHERE id=?",(game_id,)).fetchone())
+            retained_relationships = {}
+            if config.keep_reputation:
+                retained_relationships = {r["id"]:safe_json(r["properties"],{}).get("relationships") for r in conn.execute("SELECT id,properties FROM entities WHERE game_id=?",(game_id,))}
+            keep = set()
+            if config.keep_player_stats:
+                keep.update({"characters","character_traits","behavior_events","trade_skills","known_recipes","guild_membership","discovered_combinations"})
+            if config.keep_inventory:
+                keep.update({"inventory","custom_items"})
+            if config.keep_spells:
+                keep.update({"known_spells","prepared_spells","custom_spells"})
+            if config.keep_reputation:
+                keep.update({"faction_reputation","npc_reputation"})
+            if config.keep_bounties:
+                keep.add("bounties")
+            if config.keep_companions:
+                keep.add("companions")
+            tables = metadata["tables"]
+            # Snapshots made before campaign migration must not retain future
+            # campaign knowledge when rewinding to their earlier world.
+            for name in ('campaign_instances', 'world_history', 'location_conditions', 'world_event_checks', 'revival_offers'):
+                tables.setdefault(name, [])
+            # Keep referenced companion entities alongside retained companion rows.
+            retained_entities = []
+            if config.keep_companions:
+                retained_entities = [dict(r) for r in conn.execute("SELECT * FROM entities WHERE game_id=? AND id IN (SELECT entity_id FROM companions WHERE game_id=?)",(game_id,game_id))]
+            for name in tables:
+                if name not in keep:
+                    conn.execute(f'DELETE FROM "{name}" WHERE game_id=?',(game_id,))
+            for name, rows in tables.items():
+                if name in keep:
+                    continue
+                for row in rows:
+                    columns = ','.join(f'"{c}"' for c in row)
+                    marks = ','.join('?' for _ in row)
+                    conn.execute(f'INSERT INTO "{name}" ({columns}) VALUES ({marks})',tuple(row.values()))
+            for row in retained_entities:
+                if not conn.execute("SELECT 1 FROM locations WHERE id=? AND game_id=?",(row.get("location_id"),game_id)).fetchone():
+                    row["location_id"]=snapshot["location_id"]
+                columns = ','.join(f'"{c}"' for c in row)
+                marks = ','.join('?' for _ in row)
+                conn.execute(f'INSERT OR REPLACE INTO entities ({columns}) VALUES ({marks})',tuple(row.values()))
+            for entity_id,relationships in retained_relationships.items():
+                if relationships is None:
+                    continue
+                row=conn.execute("SELECT properties FROM entities WHERE id=? AND game_id=?",(entity_id,game_id)).fetchone()
+                if row:
+                    props=safe_json(row[0],{})
+                    props['relationships']=relationships
+                    conn.execute("UPDATE entities SET properties=? WHERE id=? AND game_id=?",(json.dumps(props),entity_id,game_id))
+            branch = str(uuid.uuid4())
+            conn.execute("INSERT INTO timelines(game_id,id,parent_id,fork_watermark,snapshot_id) VALUES(?,?,?,?,?)",
+                         (game_id,branch,metadata['timeline_id'],metadata['event_watermark'],snapshot['id']))
+            conn.execute("UPDATE games SET current_location_id=?,world_time=?,turn_number=?,loop_count=?,timeline_id=? WHERE id=?",
+                         (snapshot['location_id'],snapshot['world_time'],snapshot['turn_number'],current.get('loop_count',0)+1,branch,game_id))
 
-        # Conditionally restore based on config
-        if not config.keep_inventory:
-            self._restore_inventory(game_id, json.loads(snapshot["inventory_state"]))
-        if not config.keep_player_stats:
-            self._restore_player(game_id, json.loads(snapshot["player_state"]))
-        if not config.keep_reputation:
-            self._restore_social(game_id, json.loads(snapshot["social_state"]))
+    # Every game-scoped mutable table is covered automatically. Append-only
+    # history and branch metadata are retained and filtered by fork watermark.
+    _HISTORY_TABLES = {"events","canon_entries","snapshots","timelines","utterances","turn_receipts","index_outbox"}
 
-        # Reset game state to snapshot point
-        self.repos["save_game"].update_location(game_id, snapshot["location_id"])
-        self.repos["save_game"].update_world_time(game_id, snapshot["world_time"])
-
-        # Increment loop count
-        game = self.repos["save_game"].get_game(game_id)
-        loop_count = (game.get("loop_count") or 0) + 1
+    def _capture_tables(self,game_id):
         with self.repos["save_game"].db.get_connection() as conn:
-            conn.execute(
-                "UPDATE games SET loop_count = ? WHERE id = ?",
-                (loop_count, game_id),
-            )
+            names = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+            tables = {}
+            for name in names:
+                columns = {r[1] for r in conn.execute(f'PRAGMA table_info("{name}")')}
+                if "game_id" in columns and name not in self._HISTORY_TABLES:
+                    tables[name] = [dict(r) for r in conn.execute(f'SELECT * FROM "{name}" WHERE game_id=?',(game_id,))]
+            game = conn.execute("SELECT timeline_id FROM games WHERE id=?",(game_id,)).fetchone()
+            watermark = conn.execute("SELECT COALESCE(MAX(rowid),0) FROM events WHERE game_id=?",(game_id,)).fetchone()[0]
+            return {"version":2,"tables":tables,"timeline_id":game[0],"event_watermark":watermark}
 
     def record_canon_entry(self, game_id: str, snapshot_id: str, trigger: str, loop_count: int) -> None:
         """Record a time-travel event in the canon ledger."""
@@ -125,7 +181,7 @@ class StateSerializer:
         rep_repo = self.repos.get("reputation")
         if rep_repo:
             result["faction_reps"] = rep_repo.get_all_faction_reps(game_id)
-            result["bounties"] = rep_repo.get_active_bounties(game_id)
+            result["bounties"] = rep_repo.get_all_bounties(game_id)
         comp_repo = self.repos.get("companion")
         if comp_repo:
             result["companions"] = comp_repo.get_active_companions(game_id)
@@ -161,7 +217,7 @@ class StateSerializer:
             existing = ws.get_quest(quest["id"], game_id)
             if existing:
                 # Reset quest status
-                ws.update_quest(quest["id"], game_id, quest.get("status", "available"))
+                ws.update_quest_status(quest["id"], game_id, quest.get("status", "available"))
 
     def _restore_inventory(self, game_id: str, items: list) -> None:
         """Restore inventory from snapshot."""

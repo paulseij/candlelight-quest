@@ -8,6 +8,42 @@ from text_rpg.utils import safe_json
 
 # Activity descriptions keyed by profession and time period.
 NPC_ACTIVITIES: dict[str, dict[str, str]] = {
+    "resident": {
+        "dawn": "opening shutters and beginning the day's chores",
+        "morning": "carrying supplies between nearby homes and workplaces",
+        "midday": "pausing to exchange local news with passersby",
+        "afternoon": "repairing an everyday tool near the public way",
+        "evening": "finishing errands before the light fades",
+        "night": "heading home beneath the remaining lights",
+        "late_night": "sleeping at home",
+    },
+    "customer": {
+        "dawn": "waiting for the business to open",
+        "morning": "comparing goods and asking about prices",
+        "midday": "collecting a wrapped purchase from the counter",
+        "afternoon": "examining the remaining stock",
+        "evening": "finishing a last purchase before closing",
+        "night": "walking home with their purchases",
+        "late_night": "sleeping elsewhere",
+    },
+    "patron": {
+        "dawn": "finishing a quiet breakfast near the hearth",
+        "morning": "sharing road news over a modest meal",
+        "midday": "eating while listening to nearby conversation",
+        "afternoon": "playing a small table game with another patron",
+        "evening": "talking above the crowded common-room noise",
+        "night": "nursing a final drink near the fire",
+        "late_night": "sleeping elsewhere",
+    },
+    "worshipper": {
+        "dawn": "taking part in the first quiet observance",
+        "morning": "leaving a modest offering and speaking softly",
+        "midday": "sitting in reflection near the sacred focus",
+        "afternoon": "helping straighten the public sanctuary",
+        "evening": "lighting a votive and preparing to leave",
+        "night": "keeping a silent vigil",
+        "late_night": "sleeping elsewhere",
+    },
     "innkeeper": {
         "dawn": "preparing the morning fire and breakfast",
         "morning": "serving porridge and ale to early risers",

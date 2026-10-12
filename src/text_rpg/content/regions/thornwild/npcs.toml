@@ -35,6 +35,7 @@ late_night = "briarhaven_grove"
 [npcs.properties]
 preferred_gifts = ["moonpetal", "healing_herb", "enchanted_thread"]
 disliked_gifts = ["iron_ingot", "beast_hide"]
+quest_hook = "A dark blight is spreading through the sacred heartwood of Briarhaven Grove, poisoning the ancient trees"
 
 [[npcs.attacks]]
 name = "Shillelagh"
@@ -78,6 +79,7 @@ late_night = "rangers_lodge"
 [npcs.properties]
 preferred_gifts = ["rations", "healing_potion", "shortbow"]
 disliked_gifts = ["arcane_dust", "nightshade"]
+quest_hook = "Dire wolves have been attacking travelers on the northern trails with unusual aggression"
 
 [[npcs.attacks]]
 name = "Longbow"

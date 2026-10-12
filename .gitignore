@@ -31,3 +31,6 @@ saves/
 # Coverage
 htmlcov/
 .coverage
+
+# Environment variables (API keys)
+.env

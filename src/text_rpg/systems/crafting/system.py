@@ -15,14 +15,17 @@ from text_rpg.utils import safe_json
 
 
 class CraftingSystem(GameSystem):
-    """Handles crafting and training actions."""
+    """Handles crafting, training, and item invention actions."""
 
     def __init__(self) -> None:
         self._repos: dict[str, Any] | None = None
+        self._llm: Any | None = None
 
-    def inject(self, *, repos: dict | None = None, **kwargs) -> None:
+    def inject(self, *, repos: dict | None = None, llm: Any = None, **kwargs) -> None:
         if repos is not None:
             self._repos = repos
+        if llm is not None:
+            self._llm = llm
 
     @property
     def system_id(self) -> str:
@@ -30,7 +33,7 @@ class CraftingSystem(GameSystem):
 
     @property
     def handled_action_types(self) -> set[str]:
-        return {"craft", "train"}
+        return {"craft", "train", "invent_item", "enchant"}
 
     def can_handle(self, action: Action, context: GameContext) -> bool:
         return action.action_type.lower() in self.handled_action_types
@@ -41,7 +44,222 @@ class CraftingSystem(GameSystem):
             return self._resolve_craft(action, context)
         elif action_type == "train":
             return self._resolve_train(action, context)
+        elif action_type in ("invent_item", "enchant"):
+            return self._resolve_invent_item(action, context, enchanting=(action_type == "enchant"))
         return ActionResult(action_id=action.id, success=False, outcome_description="Unknown crafting action.")
+
+    # -- Item invention (player-authored items, mirrors spell invention) --
+
+    def _best_crafting_skill(self, game_id: str, char_id: str) -> tuple[str | None, int]:
+        """Highest learned trade skill and its level (None, 0 when unskilled)."""
+        trade_repo = (self._repos or {}).get("trade_skill")
+        if not trade_repo:
+            return None, 0
+        best_name, best_level = None, 0
+        for skill_name in TRADE_SKILL_DESCRIPTIONS:
+            data = trade_repo.get_skill(game_id, char_id, skill_name)
+            if data and data.get("is_learned") and data.get("level", 1) > best_level:
+                best_name, best_level = skill_name, data.get("level", 1)
+        return best_name, best_level
+
+    def _resolve_invent_item(
+        self, action: Action, context: GameContext, enchanting: bool = False,
+    ) -> ActionResult:
+        from text_rpg.llm.errors import LLMMalformedOutputError, LLMUnavailableError
+        from text_rpg.mechanics.item_invention import (
+            calculate_item_dc,
+            generate_crafting_mishap,
+            max_rarity_for_level,
+            validate_item_proposal,
+        )
+        from text_rpg.mechanics.skills import skill_check
+        from text_rpg.systems.director.generators import evaluate_item_invention
+
+        concept = (action.target_id or "").strip()
+        if not concept:
+            verb = "Enchant" if enchanting else "Invent"
+            return ActionResult(action_id=action.id, success=False,
+                                outcome_description=f"{verb} what? Describe the item you have in mind.")
+
+        repos = self._repos or {}
+        custom_repo = repos.get("custom_item")
+        if not custom_repo or not self._llm:
+            return ActionResult(action_id=action.id, success=False,
+                                outcome_description="Item invention is not available.")
+
+        char = context.character
+        char_id = char["id"]
+        game_id = context.game_id
+        level = char.get("level", 1)
+
+        base_entry = None
+        base_name = ""
+        if enchanting:
+            base_entry = self._find_owned_item(concept, context)
+            if not base_entry:
+                return ActionResult(
+                    action_id=action.id, success=False,
+                    outcome_description=f"You don't have '{concept}' to enchant.",
+                )
+            base_name = base_entry.get("item_id", "").replace("_", " ")
+
+        skill_name, skill_level = self._best_crafting_skill(game_id, char_id)
+        max_rarity = max_rarity_for_level(level, skill_level)
+        crafting_context = (
+            f"Trade skill: {skill_name} (level {skill_level})" if skill_name
+            else "No trade skill learned"
+        )
+        if enchanting:
+            crafting_context += f". Enchanting an existing item: {base_name}."
+
+        try:
+            proposal = evaluate_item_invention(
+                self._llm, concept, context, max_rarity, crafting_context,
+            )
+        except LLMUnavailableError:
+            return ActionResult(
+                action_id=action.id, success=False,
+                outcome_description=(
+                    "The storyteller cannot be reached (LLM provider unavailable). "
+                    "Nothing happened — try again in a moment."
+                ),
+            )
+        except LLMMalformedOutputError:
+            return ActionResult(
+                action_id=action.id, success=False,
+                outcome_description="You sketch designs, but nothing workable takes shape.",
+            )
+
+        valid, reason = validate_item_proposal(proposal, level, skill_level)
+        if not valid:
+            return ActionResult(action_id=action.id, success=False, outcome_description=reason)
+
+        rarity = proposal["rarity"]
+        location_type = context.location.get("location_type", "")
+        dc = calculate_item_dc(
+            proposal.get("plausibility", 0.5), rarity, location_type, skill_level > 0,
+        )
+
+        scores = safe_json(char.get("ability_scores"), {})
+        int_score = scores.get("intelligence", 10)
+        prof_bonus = char.get("proficiency_bonus", 2) + skill_level // 2
+        success, roll_result = skill_check(int_score, prof_bonus, skill_level > 0, dc)
+
+        dice_rolls = [DiceRoll(
+            dice_expression="1d20",
+            rolls=roll_result.individual_rolls,
+            modifier=roll_result.modifier,
+            total=roll_result.total,
+            purpose=f"crafting check (DC {dc})",
+        )]
+
+        mutations: list[StateMutation] = []
+        events: list[dict[str, Any]] = []
+
+        if success:
+            item_id = custom_repo.save_custom_item({
+                "game_id": game_id,
+                "character_id": char_id,
+                "name": proposal["name"],
+                "description": proposal.get("description", ""),
+                "item_type": proposal.get("item_type", "misc"),
+                "rarity": rarity,
+                "effects": proposal.get("effects", []),
+                "plausibility": proposal.get("plausibility"),
+                "creation_dc": dc,
+                "created_turn": context.turn_number,
+                "location_id": context.location.get("id"),
+            })
+            if enchanting and base_entry:
+                mutations.append(StateMutation(
+                    target_type="items_transform", target_id=char_id,
+                    field="transform", old_value=None,
+                    new_value=json.dumps({
+                        "remove_id": base_entry["item_id"], "add_id": item_id,
+                    }),
+                ))
+            else:
+                mutations.append(StateMutation(
+                    target_type="inventory", target_id=char_id,
+                    field="items_add", old_value=None,
+                    new_value={"item_id": item_id, "quantity": 1},
+                ))
+            desc = f"Success! You craft {proposal['name']} ({rarity})."
+            effect_count = len(proposal.get("effects", []))
+            if effect_count:
+                desc += f" It carries {effect_count} enchanted propert{'ies' if effect_count > 1 else 'y'}."
+            if skill_name:
+                trade_repo = repos.get("trade_skill")
+                if trade_repo:
+                    trade_repo.add_xp(game_id, char_id, skill_name, 15)
+            events.append({
+                "event_type": "ITEM_CREATED",
+                "description": f"Invented item: {proposal['name']} ({rarity})",
+                "actor_id": char_id,
+                "mechanical_details": {
+                    "item_id": item_id,
+                    "item_name": proposal["name"],
+                    "rarity": rarity,
+                    "dc": dc,
+                },
+            })
+            return ActionResult(
+                action_id=action.id, success=True, outcome_description=desc,
+                dice_rolls=dice_rolls, state_mutations=mutations, events=events,
+                xp_gained=5 + dc // 5,
+            )
+
+        # Failure — mishap scaled by margin
+        mishap = generate_crafting_mishap(rarity, dc - roll_result.total)
+        desc = mishap.description
+        if mishap.damage_to_crafter > 0:
+            old_hp = char.get("hp_current", 1)
+            mutations.append(StateMutation(
+                target_type="character", target_id=char_id, field="hp_current",
+                old_value=old_hp, new_value=old_hp - mishap.damage_to_crafter,
+            ))
+        if mishap.cursed_quirk:
+            item_id = custom_repo.save_custom_item({
+                "game_id": game_id,
+                "character_id": char_id,
+                "name": f"Flawed {proposal['name']}",
+                "description": proposal.get("description", ""),
+                "item_type": proposal.get("item_type", "misc"),
+                "rarity": "common",
+                "effects": [],
+                "cursed_quirk": mishap.cursed_quirk,
+                "plausibility": proposal.get("plausibility"),
+                "creation_dc": dc,
+                "created_turn": context.turn_number,
+                "location_id": context.location.get("id"),
+            })
+            mutations.append(StateMutation(
+                target_type="inventory", target_id=char_id,
+                field="items_add", old_value=None,
+                new_value={"item_id": item_id, "quantity": 1},
+            ))
+            desc += f" {mishap.cursed_quirk}"
+        events.append({
+            "event_type": "CRAFT_FAIL",
+            "description": f"Failed to invent {proposal.get('name', concept)}",
+            "actor_id": char_id,
+        })
+        return ActionResult(
+            action_id=action.id, success=False, outcome_description=desc,
+            dice_rolls=dice_rolls, state_mutations=mutations, events=events,
+        )
+
+    def _find_owned_item(self, name: str, context: GameContext) -> dict | None:
+        """Find an inventory entry loosely matching a name."""
+        inv = context.inventory
+        if not inv:
+            return None
+        wanted = name.lower().strip()
+        for entry in safe_json(inv.get("items"), []):
+            item_id = entry.get("item_id", "").lower()
+            if wanted in (item_id, item_id.replace("_", " ")) or wanted in item_id.replace("_", " "):
+                return entry
+        return None
 
     def _resolve_craft(self, action: Action, context: GameContext) -> ActionResult:
         target = (action.target_id or "").lower().strip()

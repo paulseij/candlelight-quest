@@ -17,11 +17,20 @@ _CONVERSATION_EXIT = re.compile(
 _CONVERSATION_BREAK_ACTIONS = frozenset({
     "move", "attack", "use_item", "equip", "unequip", "rest", "dodge", "dash", "hide",
     "disengage", "talk", "cast_spell", "flee", "combat_item", "combat_spell", "class_ability",
-    "combine_spell", "invent_spell",
+    "combine_spell", "invent_spell", "pickup", "hunt", "danger",
+    "options",
+    "revival_options", "revival_quote", "revival_confirm", "revival_cancel",
 })
 
 # Order matters — more specific patterns must come before greedy ones like "look" and "search".
 PATTERNS: list[tuple[str, str, re.Pattern]] = [
+    ("options", "options", re.compile(r"^(?:options|suggest(?:ed)? actions?|what can i do here|what should i do)[?.!]*$", re.I)),
+    ("hunt", "hunt", re.compile(r"^(?:hunt|seek (?:combat|trouble|enemies)|look for enemies)$", re.I)),
+    ("danger", "danger", re.compile(r"^(?:danger|combat zones|where can i fight)[?.!]*$", re.I)),
+    ("revival_options", "revival", re.compile(r"^(?:revival(?:\s+(?:options|help))?|resurrection\s+options)$", re.I)),
+    ("revival_confirm", "revival", re.compile(r"^confirm\s+revival$", re.I)),
+    ("revival_cancel", "revival", re.compile(r"^cancel\s+revival$", re.I)),
+    ("revival_quote", "revival", re.compile(r"^(?:revival|revive|resurrect)\s+(.+)$", re.I)),
     # Meta commands first (exact matches + natural phrasing)
     ("inventory", "meta", re.compile(r"^(?:inventory|items|bag|backpack|(?:(?:look|check|open|show|view|what(?:'s|\s+is)\s+in)\s+(?:my\s+)?(?:inventory|bag|backpack|pack|items))|what\s+(?:do\s+i\s+have|am\s+i\s+carrying|(?:is|are)\s+in\s+my\s+(?:inventory|bag|pack|backpack|items)))(?:\s+(.+))?$", re.I)),
     ("inventory", "meta", re.compile(r"^i$", re.I)),  # standalone "i" only
@@ -34,22 +43,31 @@ PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("reputation", "meta", re.compile(r"^(?:reputation|rep|standing|standings|factions?)$", re.I)),
     ("bounty", "meta", re.compile(r"^(?:bounty|bounties|wanted)$", re.I)),
     ("stories", "meta", re.compile(r"^(?:stories|story|arcs?|campaigns?)$", re.I)),
-    ("traits", "meta", re.compile(r"^(?:traits?|perks?|passive(?:s|\\s+abilities)?)$", re.I)),
+    ("traits", "meta", re.compile(r"^(?:traits?|perks?|passive(?:s|\s+abilities)?)$", re.I)),
     ("map", "meta", re.compile(r"^(?:map|world\s*map)$", re.I)),
-    ("rewind", "meta", re.compile(r"^(?:rewind|go\s+back|time\s*travel|undo)$", re.I)),
+    ("rewind", "meta", re.compile(r"^(?:rewind|time\s*travel|undo)$", re.I)),
+
+    # Quest accept/decline (before movement/greedy patterns)
+    ("accept_quest", "accept_quest", re.compile(r"^(?:accept|take(?:\s+on)?)\s+(?:the\s+)?(?:quest|job|task|contract|offer)(?:\s+(.+))?$", re.I)),
+    ("accept_quest", "accept_quest", re.compile(r"^(?:i(?:'ll|\s+will)\s+(?:do\s+it|help(?:\s+you)?|take\s+it)|accept)$", re.I)),
+    ("decline_quest", "decline_quest", re.compile(r"^(?:decline|refuse|reject)\s+(?:the\s+)?(?:quest|job|task|contract|offer)$", re.I)),
+    ("decline_quest", "decline_quest", re.compile(r"^(?:no\s+thanks|not\s+interested|decline)$", re.I)),
 
     # Movement
     ("move", "move", re.compile(r"^(?:go|move|walk|head|travel)\s+(?:to\s+)?(.+)$", re.I)),
-    ("move", "move", re.compile(r"^(north|south|east|west|northeast|northwest|southeast|southwest|n|s|e|w|up|down|ne|nw|se|sw)$", re.I)),
+    ("move", "move", re.compile(r"^((?:north|south|east|west|northeast|northwest|southeast|southwest|n|s|e|w|up|down|ne|nw|se|sw)(?:\s+[1-9]\d*)?)$", re.I)),
 
     # Actions (greedy patterns last)
     ("attack", "attack", re.compile(r"^(?:attack|hit|strike|fight|kill|stab|slash)\s+(.+)$", re.I)),
     ("talk", "talk", re.compile(r"^(?:can\s+i\s+|let\s+me\s+|i\s+want\s+to\s+|i(?:'d|\s+would)\s+like\s+to\s+)?(?:talk|speak|chat)\s+(?:to|with)\s+(.+?)[\s?.!]*$", re.I)),
     ("equip", "equip", re.compile(r"^(?:equip|wear|wield|put\s+on)\s+(.+)$", re.I)),
     ("unequip", "unequip", re.compile(r"^(?:unequip|remove|take\s+off|doff)\s+(.+)$", re.I)),
+    ("buy_home", "buy_home", re.compile(r"^(?:buy\s+home|buy\s+house|buy\s+property|purchase\s+home)$", re.I)),
     ("buy", "buy", re.compile(r"^(?:buy|purchase)\s+(.+)$", re.I)),
     ("sell", "sell", re.compile(r"^(?:sell)\s+(.+)$", re.I)),
     ("browse", "browse", re.compile(r"^(?:browse|shop|store|wares|merchandise)$", re.I)),
+    ("invent_item", "invent_item", re.compile(r"^(?:invent|forge|create|fashion|craft)\s+(?:an?\s+)?item\s+(?:called\s+|named\s+)?(.+)$", re.I)),
+    ("enchant", "enchant", re.compile(r"^enchant\s+(?:my\s+|the\s+)?(.+)$", re.I)),
     ("craft", "craft", re.compile(r"^(?:craft|brew|forge|cook|make)\s+(.+)$", re.I)),
     ("combine_spell", "combine_spell", re.compile(r"^(?:combine|merge|fuse|blend)\s+(.+?)\s+(?:and|with|\+)\s+(.+?)$", re.I)),
     ("invent_spell", "invent_spell", re.compile(r"^(?:invent|create|design|research)\s+(?:a\s+)?(?:spell|magic)\s+(?:that\s+|to\s+|of\s+)?(.+)$", re.I)),
@@ -64,11 +82,11 @@ PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("train", "train", re.compile(r"^(?:train|learn|study)\s+(.+)$", re.I)),
     ("spells", "meta", re.compile(r"^(?:spells?|spellbook|(?:(?:show|view|check)\s+(?:my\s+)?(?:spells?|spellbook)))$", re.I)),
     ("recipes", "meta", re.compile(r"^(?:recipes?|crafting|trade\s*skills?)(?:\s+(.+))?$", re.I)),
+    ("pickup", "pickup", re.compile(r"^(?:pick\s+up|take(?!\s+out\b)|collect|grab)(?:\s+(.+?))?[\s.!?]*$", re.I)),
     ("puzzle", "puzzle", re.compile(r"^(?:solve|unlock|disarm|answer|pick\s+lock|pick)\s*(.*)$", re.I)),
     ("recruit", "recruit", re.compile(r"^(?:recruit|hire|enlist)\s+(.+)$", re.I)),
     ("dismiss", "dismiss", re.compile(r"^(?:dismiss|release|let\s+go(?:\s+of)?)\s+(.+)$", re.I)),
     ("give", "give", re.compile(r"^(?:give|gift|offer)\s+(.+?)(?:\s+to\s+(.+))?$", re.I)),
-    ("buy_home", "buy_home", re.compile(r"^(?:buy\s+home|buy\s+house|buy\s+property|purchase\s+home)$", re.I)),
     ("store", "store", re.compile(r"^(?:store|stash|deposit)\s+(.+)$", re.I)),
     ("retrieve", "retrieve", re.compile(r"^(?:retrieve|withdraw|take\s+out)\s+(.+)$", re.I)),
     ("upgrade_home", "upgrade_home", re.compile(r"^(?:upgrade|improve)\s*(.*)$", re.I)),
@@ -76,6 +94,7 @@ PATTERNS: list[tuple[str, str, re.Pattern]] = [
     ("use_item", "use_item", re.compile(r"^(?:use|drink|eat|consume|apply)\s+(.+)$", re.I)),
     ("rest", "rest", re.compile(r"^(?:rest|sleep|camp)(?:\s+(short|long))?$", re.I)),
     ("dodge", "dodge", re.compile(r"^(?:dodge|evade)$", re.I)),
+    ("grapple", "combat", re.compile(r"^(?:grapple|wrestle|grab hold of)\s+(.+)$", re.I)),
     ("dash", "dash", re.compile(r"^(?:dash|run|sprint)$", re.I)),
     ("hide", "hide", re.compile(r"^(?:hide|sneak)$", re.I)),
     ("flee", "combat", re.compile(r"^(?:flee|escape|retreat)$", re.I)),
@@ -115,7 +134,8 @@ class InputHandler:
             if match:
                 target = match.group(1).strip() if match.lastindex and match.group(1) else None
                 if action_name == "move" and target:
-                    target = DIRECTION_MAP.get(target.lower(), target.lower())
+                    direction, separator, branch = target.lower().partition(" ")
+                    target = DIRECTION_MAP.get(direction, direction) + (separator + branch if separator else "")
                 parameters: dict[str, Any] = {}
                 if action_name == "rest":
                     parameters["rest_type"] = (target or "short").lower()

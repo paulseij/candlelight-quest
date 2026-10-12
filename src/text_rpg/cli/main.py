@@ -48,5 +48,37 @@ def check() -> None:
     display.show_system_check()
 
 
+@app.command()
+def reindex(
+    save_name: Optional[str] = typer.Option(None, "--save", "-s", help="Save to reindex (default: all)"),
+) -> None:
+    """Rebuild the GM's memory (RAG vectors) from the events ledger."""
+    from text_rpg.app import GameApp
+
+    game_app = GameApp()
+    repos = game_app._get_repos()
+    games = repos["save_game"].list_games()
+    if save_name:
+        games = [g for g in games if g.get("name") == save_name]
+        if not games:
+            typer.echo(f"No save named '{save_name}' found.")
+            raise typer.Exit(1)
+    if not game_app.indexer.is_available:
+        reason = getattr(game_app, "rag_disabled_reason", None) or "embedding backend unreachable"
+        typer.echo(f"Cannot reindex: {reason}")
+        raise typer.Exit(1)
+    for game in games:
+        count = game_app.indexer.reindex_from_db(repos, game["id"])
+        typer.echo(f"Reindexed {count} documents for '{game.get('name', game['id'])}'.")
+
+
+@app.command()
+def setup() -> None:
+    """Choose your LLM provider and model."""
+    from text_rpg.cli.setup_wizard import run_setup_wizard
+
+    run_setup_wizard()
+
+
 if __name__ == "__main__":
     app()

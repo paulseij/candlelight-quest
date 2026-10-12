@@ -148,6 +148,27 @@ def load_work_order_templates() -> list[dict[str, Any]]:
     return data.get("orders", [])
 
 
+_NPC_CACHE: dict[str, dict] | None = None
+
+
+def load_all_npcs() -> dict[str, dict]:
+    """Load all NPCs from all regions, indexed by NPC ID. Cached after first call."""
+    global _NPC_CACHE
+    if _NPC_CACHE is not None:
+        return _NPC_CACHE
+    npcs: dict[str, dict] = {}
+    regions_dir = CONTENT_DIR / "regions"
+    if regions_dir.exists():
+        for d in sorted(regions_dir.iterdir()):
+            npcs_file = d / "npcs.toml"
+            if d.is_dir() and npcs_file.exists():
+                data = load_toml(npcs_file)
+                for npc in data.get("npcs", []):
+                    npcs[npc["id"]] = npc
+    _NPC_CACHE = npcs
+    return _NPC_CACHE
+
+
 def load_region(region_id: str) -> dict[str, Any]:
     region_dir = CONTENT_DIR / "regions" / region_id
     region_data = load_toml(region_dir / "region.toml")
@@ -173,3 +194,33 @@ def load_region(region_id: str) -> dict[str, Any]:
         shops_data = load_toml(shops_file)
         region_data["shops"] = shops_data.get("shops", [])
     return region_data
+
+
+def load_region_encounters(region_id: str) -> list[dict[str, Any]]:
+    """Load just a region's random-encounter definitions ([] when absent)."""
+    encounters_file = CONTENT_DIR / "regions" / region_id / "encounters.toml"
+    if not encounters_file.exists():
+        return []
+    return load_toml(encounters_file).get("encounters", [])
+
+
+# Cached static index: authored location_id -> region_id
+_LOCATION_REGION_INDEX: dict[str, str] | None = None
+
+
+def find_region_for_location(location_id: str) -> str | None:
+    """Which authored region does this location id belong to? None if unknown."""
+    global _LOCATION_REGION_INDEX
+    if _LOCATION_REGION_INDEX is None:
+        index: dict[str, str] = {}
+        regions_dir = CONTENT_DIR / "regions"
+        if regions_dir.exists():
+            for d in sorted(regions_dir.iterdir()):
+                locs_file = d / "locations.toml"
+                if d.is_dir() and locs_file.exists():
+                    loc_data = load_toml(locs_file)
+                    for loc in loc_data.get("locations", []):
+                        if loc.get("id"):
+                            index[loc["id"]] = d.name
+        _LOCATION_REGION_INDEX = index
+    return _LOCATION_REGION_INDEX.get(location_id)

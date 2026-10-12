@@ -133,9 +133,9 @@ class TestPackNarrativeContext:
         assert "NPC_5" not in ctx
 
     def test_limits_events_to_5(self, packer, char, location):
-        events = [{"description": f"Event {i}"} for i in range(10)]
+        events = [{"description": f"Event {i}"} for i in reversed(range(10))]
         ctx = packer.pack_narrative_context(char, location, events)
-        # Should only include last 5 (most recent)
+        # Ledger is newest first; retain its first five, present chronologically.
         assert "Event 9" in ctx
         assert "Event 0" not in ctx
 

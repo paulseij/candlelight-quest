@@ -38,16 +38,20 @@ class EventLedgerRepo:
         placeholders = ", ".join("?" for _ in data)
         sql = f"INSERT INTO events ({columns}) VALUES ({placeholders})"
         with self.db.get_connection() as conn:
-            conn.execute(sql, list(data.values()))
+            game = conn.execute("SELECT timeline_id FROM games WHERE id=?",(data["game_id"],)).fetchone()
+            data.setdefault("timeline_id", game[0] if game else "prime")
+            columns = ", ".join(data)
+            placeholders = ", ".join("?" for _ in data)
+            conn.execute(f"INSERT INTO events ({columns}) VALUES ({placeholders})", list(data.values()))
+            conn.execute("INSERT OR IGNORE INTO index_outbox(event_id,game_id) VALUES(?,?)",(data["id"],data["game_id"]))
 
     def get_recent(self, game_id: str, limit: int = 20) -> list[dict]:
         """Return the most recent events for a game."""
+        from text_rpg.storage.memory import lineage
         with self.db.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM events WHERE game_id = ? "
-                "ORDER BY timestamp DESC LIMIT ?",
-                (game_id, limit),
-            ).fetchall()
+            branches = lineage(conn,game_id)
+            rows = conn.execute("SELECT rowid AS watermark,* FROM events WHERE game_id=? ORDER BY rowid DESC",(game_id,)).fetchall()
+            rows = [row for row in rows if row["watermark"] <= branches.get(row["timeline_id"],-1)][:limit]
         return _deserialize_many(rows)
 
     def get_by_type(
@@ -83,6 +87,15 @@ class EventLedgerRepo:
                 "SELECT * FROM events WHERE game_id = ? AND location_id = ? "
                 "ORDER BY timestamp DESC LIMIT ?",
                 (game_id, location_id, limit),
+            ).fetchall()
+        return _deserialize_many(rows)
+
+    def get_all(self, game_id: str) -> list[dict]:
+        """Return every event for a game in chronological order."""
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM events WHERE game_id = ? ORDER BY timestamp ASC",
+                (game_id,),
             ).fetchall()
         return _deserialize_many(rows)
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from text_rpg.content.loader import load_all_items
 from text_rpg.mechanics.ability_scores import modifier
 from text_rpg.mechanics.combat_math import calculate_ac, calculate_ac_unarmored
 from text_rpg.models.action import Action, ActionResult, StateMutation
@@ -18,19 +17,36 @@ ITEM_EFFECTS: dict[str, dict[str, Any]] = {
 
 
 class InventorySystem(GameSystem):
+    def __init__(self) -> None:
+        self._repos: dict[str, Any] | None = None
+
+    def inject(self, *, repos: dict | None = None, **kwargs: Any) -> None:
+        if repos is not None:
+            self._repos = repos
+
+    def _catalog(self, context: GameContext) -> dict[str, dict]:
+        """Item catalog including this character's custom (invented) items."""
+        from text_rpg.systems.item_catalog import get_item_catalog
+        return get_item_catalog(
+            self._repos, context.game_id, context.character.get("id"),
+        )
+
     @property
     def system_id(self) -> str:
         return "inventory"
 
     @property
     def handled_action_types(self) -> set[str]:
-        return {"use_item", "equip", "unequip"}
+        return {"use_item", "equip", "unequip", "pickup"}
 
     def can_handle(self, action: Action, context: GameContext) -> bool:
         return action.action_type.lower() in self.handled_action_types
 
     def resolve(self, action: Action, context: GameContext) -> ActionResult:
         action_type = action.action_type.lower()
+        if action_type == "pickup":
+            from text_rpg.systems.inventory.pickup import pickup
+            return pickup(action, context, self._repos, self._catalog(context))
         if action_type == "equip":
             return self._resolve_equip(action, context)
         elif action_type == "unequip":
@@ -49,7 +65,7 @@ class InventorySystem(GameSystem):
 
         items = safe_json(inv.get("items"), [])
 
-        all_items = load_all_items()
+        all_items = self._catalog(context)
         found_entry = None
         found_item_data = None
         for entry in items:
@@ -140,7 +156,7 @@ class InventorySystem(GameSystem):
 
         char = context.character
         char_id = char["id"]
-        all_items = load_all_items()
+        all_items = self._catalog(context)
         mutations: list[StateMutation] = []
         events: list[dict[str, Any]] = []
         descriptions: list[str] = []
@@ -234,7 +250,7 @@ class InventorySystem(GameSystem):
             # Check if character has armor already equipped
             current_armor_id = char.get("equipped_armor_id")
             if current_armor_id:
-                all_items = load_all_items()
+                all_items = self._catalog(context)
                 current_armor = all_items.get(current_armor_id, {})
                 if current_armor.get("armor_type") != "shield":
                     base_ac = calculate_ac(
@@ -270,7 +286,7 @@ class InventorySystem(GameSystem):
         item_id = found_item["item_id"]
 
         # Check if this is a scroll — delegate to scroll usage
-        all_items_data = load_all_items()
+        all_items_data = self._catalog(context)
         item_full_data = all_items_data.get(item_id, {})
         if item_full_data.get("item_type") == "scroll":
             return self._resolve_use_scroll(action, context, found_item, item_full_data)
@@ -342,7 +358,7 @@ class InventorySystem(GameSystem):
                     "actor_id": char["id"],
                 })
 
-        all_items_data = load_all_items()
+        all_items_data = self._catalog(context)
         item_display_name = all_items_data.get(item_id, {}).get("name", item_id)
 
         if not effects and not need_effects:

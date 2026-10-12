@@ -17,6 +17,12 @@ class StatusBar:
         """Print a compact status line: HP | Mana | Gold | Time | Location."""
         line = Text()
 
+        # Character name
+        name = character.get("name", "")
+        if name:
+            line.append(name, style="bold cyan")
+            line.append(" | ", style="dim")
+
         # HP bar
         hp_cur = character.get("hp_current", 0)
         hp_max = character.get("hp_max", 1)
@@ -68,6 +74,8 @@ class StatusBar:
                 line.append(label, style="dim")
                 if day:
                     line.append(f" D{day}", style="dim")
+                if world_time.get("clock"):
+                    line.append(f" {world_time['clock']}", style="dim")
 
         # Location
         if location_name:

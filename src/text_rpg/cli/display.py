@@ -5,7 +5,7 @@ import json
 import urllib.request
 
 from rich import box
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -72,17 +72,24 @@ class Display:
         if items:
             content.append("\nItems: ", style="bold")
             content.append(", ".join(items))
+        renderable = content
         if exits:
-            content.append("\n\nExits:\n", style="bold")
-            for e in exits:
-                if isinstance(e, dict):
-                    direction = e.get("direction", "?")
-                    desc = e.get("description", e.get("target_location_id", "?"))
-                    content.append(f"  {direction:<12}", style="cyan bold")
-                    content.append(f"{desc}\n")
-                else:
-                    content.append(f"  {e}\n")
-        self.console.print(Panel(content, border_style="yellow", box=box.ROUNDED, width=self.width))
+            content.append("\n\nExits:", style="bold")
+            exit_table = Table.grid(padding=(0, 1), expand=True)
+            exit_table.add_column(width=14, no_wrap=True, style="cyan bold")
+            exit_table.add_column(ratio=1, overflow="fold")
+            from text_rpg.engine.exits import exit_options
+            for direction, exit_info in exit_options(exits):
+                desc = exit_info.get("description", exit_info.get("target_location_id", "?"))
+                exit_table.add_row(Text(f"  {direction}"), Text(str(desc)))
+            for exit_info in exits:
+                if not isinstance(exit_info, dict):
+                    exit_table.add_row(Text(str(exit_info)), Text(""))
+            numbered = [label for label, conn in exit_options(exits) if label != conn.get("direction", "").lower()]
+            if numbered:
+                exit_table.add_row(Text(""), Text(f"Choose a numbered path with go {numbered[0]}, for example.", style="dim"))
+            renderable = Group(content, exit_table)
+        self.console.print(Panel(renderable, border_style="yellow", box=box.ROUNDED, width=self.width))
 
     def show_dice_roll(
         self, expression: str, rolls: list[int], modifier: int, total: int, purpose: str = ""
@@ -255,6 +262,7 @@ class Display:
             combat.add_row("[3] / use <item>", "Use an item during combat")
             combat.add_row("[4] / flee", "Attempt to flee (DEX check)")
             combat.add_row("[5] / dodge", "Impose disadvantage on attacks against you")
+            combat.add_row("grapple <target>", "Contest Athletics to reduce a target's speed to zero")
             combat.add_row("dash", "Double your movement this turn")
             combat.add_row("disengage", "Move without provoking opportunity attacks")
             self.console.print(combat)
@@ -289,16 +297,23 @@ class Display:
         actions.add_column("Command", style="cyan bold", width=22)
         actions.add_column("Description")
         actions.add_row("look", "Examine your surroundings")
+        actions.add_row("options", "Show useful actions for the current scene")
         actions.add_row("go <direction>", "Move (north, south, east, west, etc.)")
         actions.add_row("talk to <npc>", "Talk to an NPC")
         actions.add_row("attack <target>", "Attack an enemy")
         actions.add_row("use <item>", "Use an item from your inventory")
         actions.add_row("equip <item>", "Equip a weapon or armor")
         actions.add_row("unequip <slot>", "Unequip weapon, armor, or all")
-        actions.add_row("search", "Search the area for hidden things")
+        actions.add_row("search", "Choose a feature to search, or search the area")
+        actions.add_row("search behind <feature>", "Investigate a specific visible feature")
+        actions.add_row("danger", "List established combat zones")
+        actions.add_row("hunt", "Spend ten minutes seeking a hostile encounter")
         actions.add_row("craft <item>", "Craft an item using a known recipe")
         actions.add_row("train <skill>", "Learn a trade skill from a trainer")
         actions.add_row("cast <spell>", "Cast a spell (e.g. cast fire bolt at goblin)")
+        actions.add_row("revival options", "View local ritual providers and costs")
+        actions.add_row("revival <name> with <caster>", "Review a revival offer before paying")
+        actions.add_row("confirm revival / cancel revival", "Accept or decline the reviewed ritual")
         actions.add_row("rest / rest short", "Short rest (spend hit dice to heal)")
         actions.add_row("rest long", "Long rest (full HP restore, 8 hours)")
         actions.add_row("browse / shop", "Browse a shop's wares")
@@ -383,10 +398,15 @@ class Display:
             "[bold]How to Play[/bold]\n\n"
             "Type what you want to do in plain language, or use commands:\n\n"
             "  [cyan]look[/cyan]          Examine your surroundings\n"
+            "  [cyan]options[/cyan]       Show actions that work in this scene\n"
             "  [cyan]go north[/cyan]      Move in a direction (n/s/e/w work too)\n"
             "  [cyan]talk to[/cyan] ...   Speak with NPCs\n"
             "  [cyan]attack[/cyan] ...    Fight enemies\n"
             "  [cyan]search[/cyan]        Look for hidden things\n"
+            "  [cyan]inspect[/cyan] ...   Examine a visible feature without spending time\n"
+            "  [cyan]pick up[/cyan] ...   Collect an item shown on the ground\n"
+            "  [cyan]danger[/cyan]        List known combat zones\n"
+            "  [cyan]hunt[/cyan]          Seek an encounter in a dangerous place\n"
             "  [cyan]inventory[/cyan]     Check your pack\n"
             "  [cyan]character[/cyan]     View your stats\n"
             "  [cyan]skills[/cyan]        View your skill proficiencies\n"
@@ -442,21 +462,68 @@ class Display:
         return self.console.input(f"[bold cyan]{prompt}[/bold cyan]").strip()
 
     def show_system_check(self) -> None:
+        import tomllib
+        from pathlib import Path
+        from text_rpg.llm.env import load_env, get_api_key
+        from text_rpg.llm.ollama_provider import DEFAULT_LOCAL_MODEL
+
+        load_env()
+        config_path = Path(__file__).parent.parent.parent.parent / "config.toml"
+        config: dict = {}
+        if config_path.exists():
+            with open(config_path, "rb") as f:
+                config = tomllib.load(f)
+        llm_cfg = config.get("llm", {})
+        provider = llm_cfg.get("provider", "ollama")
+        model = llm_cfg.get("model", DEFAULT_LOCAL_MODEL)
+
         self.console.print("\n[bold]System Check[/bold]\n")
+        self.console.print(f"Provider: [bold]{provider}[/bold]  Model: [bold]{model}[/bold]\n")
+
+        if provider == "ollama":
+            try:
+                req = urllib.request.Request("http://localhost:11434/api/tags")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read())
+                    models = [m.get("name", "") for m in data.get("models", [])]
+                    self.console.print("[green]Ollama:[/green] Running")
+                    for m in models:
+                        self.console.print(f"  Model: {m}")
+                    configured = model.removesuffix(":latest")
+                    available = {m.removesuffix(":latest") for m in models}
+                    if configured not in available:
+                        self.console.print(
+                            f"  [yellow]Warning: configured model '{model}' was not found. "
+                            f"Run: ollama pull {model}[/yellow]"
+                        )
+                    if not any("nomic-embed-text" in m for m in models):
+                        self.console.print("  [yellow]Warning: 'nomic-embed-text' not found. Run: ollama pull nomic-embed-text[/yellow]")
+            except Exception:
+                self.console.print("[red]Ollama:[/red] Not running. Start with: ollama serve")
+        else:
+            # Cloud provider — check API key
+            key = get_api_key(provider)
+            if key:
+                masked = key[:4] + "..." + key[-4:]
+                self.console.print(f"[green]{provider.title()} API key:[/green] {masked}")
+            else:
+                self.console.print(f"[red]{provider.title()} API key:[/red] Not set. Run [cyan]text-rpg setup[/cyan] to configure.")
+
+        # RAG / embeddings status
         try:
-            req = urllib.request.Request("http://localhost:11434/api/tags")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-                models = [m.get("name", "") for m in data.get("models", [])]
-                self.console.print("[green]Ollama:[/green] Running")
-                for m in models:
-                    self.console.print(f"  Model: {m}")
-                if not any("mistral" in m for m in models):
-                    self.console.print("  [yellow]Warning: 'mistral' not found. Run: ollama pull mistral[/yellow]")
-                if not any("nomic-embed-text" in m for m in models):
-                    self.console.print("  [yellow]Warning: 'nomic-embed-text' not found. Run: ollama pull nomic-embed-text[/yellow]")
-        except Exception:
-            self.console.print("[red]Ollama:[/red] Not running. Start with: ollama serve")
+            from text_rpg.app import GameApp
+
+            game_app = GameApp()
+            embeddings = game_app.embeddings
+            reason = getattr(game_app, "rag_disabled_reason", None)
+            tag = getattr(embeddings, "model_tag", "?")
+            if reason:
+                self.console.print(f"[yellow]RAG memory:[/yellow] Disabled — {reason}")
+            else:
+                self.console.print(f"[green]RAG memory:[/green] {tag}")
+        except Exception as e:
+            self.console.print(f"[yellow]RAG memory:[/yellow] Could not check ({e})")
+
         for pkg in ["pydantic", "litellm", "chromadb", "rich", "typer", "jinja2"]:
             try:
                 __import__(pkg)

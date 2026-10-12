@@ -187,6 +187,12 @@ location_id = "grand_cathedral"
 shop_type = "temple"
 
 [[shops.stock]]
+item_id = "revivify_diamond"
+quantity = 1
+base_price = 300
+base_stock = 1
+
+[[shops.stock]]
 item_id = "healing_potion"
 quantity = 10
 base_price = 40

@@ -164,6 +164,7 @@ late_night = "thornfield_village"
 [npcs.properties]
 preferred_gifts = ["rations", "healing_herb"]
 disliked_gifts = ["arcane_dust", "spider_silk"]
+quest_hook = "Wolves have been attacking the farms near the Whisperwood — but these aren't normal wolves, they're too smart, too organized"
 
 [[npcs.attacks]]
 name = "Pitchfork"
@@ -207,6 +208,7 @@ late_night = "thornfield_village"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "rations"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "An important supply shipment from Ironridge never arrived — the road may have been hit by bandits"
 
 [[npcs.attacks]]
 name = "Longsword"

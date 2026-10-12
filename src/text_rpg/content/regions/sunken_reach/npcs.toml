@@ -78,6 +78,7 @@ late_night = "murkfen_shrine"
 [npcs.properties]
 preferred_gifts = ["healing_herb", "moonpetal", "holy_symbol"]
 disliked_gifts = ["nightshade", "poison_vial", "dagger"]
+quest_hook = "Restless spirits have been rising from the sunken ruins beneath the swamp, tormenting the living"
 
 [[npcs.attacks]]
 name = "Sacred Flame"
@@ -164,6 +165,7 @@ late_night = "hermit_island"
 [npcs.properties]
 preferred_gifts = ["moonpetal", "arcane_dust", "soul_gem"]
 disliked_gifts = ["rations", "iron_ingot", "chain_mail"]
+quest_hook = "The waters are whispering of something stirring in the drowned temple — an old evil that should have stayed buried"
 
 [[npcs.attacks]]
 name = "Witch Bolt"

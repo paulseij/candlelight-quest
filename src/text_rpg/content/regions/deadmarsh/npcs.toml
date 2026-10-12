@@ -37,6 +37,7 @@ late_night = "ashwatch_fortress"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "rations"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "The corruption is advancing faster than usual — patrols have gone missing near the bone spires"
 
 [[npcs.attacks]]
 name = "Warding Greatsword"
@@ -169,6 +170,7 @@ late_night = "mage_camp"
 [npcs.properties]
 preferred_gifts = ["arcane_dust", "soul_gem", "moonpetal"]
 disliked_gifts = ["rations", "iron_ingot"]
+quest_hook = "The crystal fields are emitting strange magical pulses — I need someone brave enough to collect samples from the epicenter"
 
 [[npcs.attacks]]
 name = "Force Bolt"
@@ -257,6 +259,7 @@ late_night = "scavenger_camp"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "rations"]
 disliked_gifts = ["moonpetal", "holy_symbol"]
+quest_hook = "My scouts found a pre-corruption vault in the wasteland, but it's guarded by something nasty"
 
 [[npcs.attacks]]
 name = "Salvaged Blade"

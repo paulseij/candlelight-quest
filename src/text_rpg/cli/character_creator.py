@@ -570,7 +570,10 @@ class CharacterCreator:
 
         # Pick +1 (must be different from primary)
         remaining = [c for c in choices if c != primary]
-        self.console.print(f"\n[bold]Choose +1 bonus:[/bold] [dim](remaining: {', '.join(c.capitalize() for c in remaining)})[/dim]")
+        self.console.print("\n[bold]Choose +1 bonus:[/bold]")
+        for i, ability in enumerate(remaining, 1):
+            desc = ABILITY_DESCRIPTIONS.get(ability, "")
+            self.console.print(f"  [cyan]{i}.[/cyan] [bold]{ability.capitalize()}[/bold]  [dim]{desc}[/dim]")
         while True:
             choice = self.console.input("[bold cyan]+1 > [/bold cyan]").strip()
             if choice.lower() == "back":

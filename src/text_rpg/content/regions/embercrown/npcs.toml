@@ -169,6 +169,7 @@ late_night = "ember_barracks"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "antidote"]
 disliked_gifts = ["nightshade", "arcane_dust"]
+quest_hook = "Cultists are gathering in the mining tunnels, performing rituals to awaken the slumbering Fire Giant king"
 
 [[npcs.attacks]]
 name = "Flame Blade"
@@ -257,6 +258,7 @@ late_night = "embercrown_arena"
 [npcs.properties]
 preferred_gifts = ["healing_potion", "longsword"]
 disliked_gifts = ["moonpetal", "holy_symbol"]
+quest_hook = "A pack of fire salamanders has been raiding caravans on the road to the caldera — someone strong enough needs to clear them out"
 
 [[npcs.attacks]]
 name = "Greatsword"

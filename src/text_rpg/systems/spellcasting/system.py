@@ -109,6 +109,10 @@ class SpellcastingSystem(GameSystem):
                 outcome_description=f"Unknown spell '{spell_name_input}'. Type 'spells' to see your known spells.",
             )
 
+        if spell.get('mechanics', {}).get('effect') == 'revivify':
+            # An invented spell cannot lower the canonical cost of this effect.
+            spell = {**spell, 'level': max(3, spell.get('level', 0))}
+
         # Check spell is known/prepared
         repos = self._repos or {}
         spell_repo = repos.get("spell")
@@ -188,7 +192,16 @@ class SpellcastingSystem(GameSystem):
         spell_type = mechanics.get("type", "utility")
         outcome_parts: list[str] = []
 
-        if spell_type == "attack":
+        if mechanics.get('effect') == 'revivify':
+            from text_rpg.engine.revival import resolve_revivify
+            revival = resolve_revivify(action, context, repos)
+            if not revival.success:
+                return revival
+            mutations.extend(revival.state_mutations)
+            events.extend(revival.events)
+            outcome_parts.append(revival.outcome_description)
+
+        elif spell_type == "attack":
             result = self._resolve_attack_spell(
                 spell, mechanics, spell_attack_bonus, target_entity,
                 char, char_id, char.get("level", 1), dice_rolls, mutations, events,

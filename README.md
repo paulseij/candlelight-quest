@@ -3,7 +3,7 @@
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/D%26D-5e%20SRD-cc0000?style=for-the-badge" />
   <img src="https://img.shields.io/badge/LLM-Ollama-7C3AED?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/Tests-724%20passing-brightgreen?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Tests-1981%20passing-brightgreen?style=for-the-badge" />
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" />
 </p>
 
@@ -54,7 +54,7 @@
 
 ## The Idea
 
-Most text adventures are trees of pre-written branches. Candlelight Quest is different. It uses a local LLM (via Ollama) as a **narrator** — not a game master — while keeping all mechanics grounded in D&D 5e rules with real dice rolls. The LLM doesn't decide if your fireball hits; it describes the way the flames curl around the goblin's shield right before the d20 says it misses.
+Candlelight Quest combines an authoritative D&D 5e simulation with a local LLM for interpreting freeform actions and playing NPCs. The engine resolves dice rolls and world changes, then displays the committed outcome. Generated dialogue adds character voice, while saved conversations and commitments supply continuity.
 
 The result is a game that feels authored and alive, but is mechanically fair.
 
@@ -74,19 +74,21 @@ The result is a game that feels authored and alive, but is mechanically fair.
 ## Features
 
 ### Core Engine
-- **7-step turn loop**: Normalize → Retrieve → Constrain → Propose → Validate → Director → Render
+- **Transactional turn loop**: Interpret → Resolve on isolated state → Validate → Commit → Present
 - **Three-ledger SQLite storage**: World State (mutable), Event Ledger (append-only), Canon Ledger (hash-chained)
-- **RAG memory**: ChromaDB + nomic-embed-text embeddings — the narrator remembers what happened 50 turns ago
+- **Durable memory**: SQLite conversations, full-text recall and timeline-aware commitments; optional vector retrieval
 - **TOML-driven content**: Races, classes, items, spells, regions, factions, quests — all data, no code
 - **Pure mechanics**: Every calculation in `mechanics/` is a pure function with zero I/O
 
 ### Combat
 - **D&D 5e initiative** with full turn-based combat
 - **Numbered menu**: `[1] Attack  [2] Cast Spell  [3] Use Item  [4] Flee  [5] Dodge`
-- **NPC AI**: Enemies flee at <25% HP, target the weakest party member, use abilities tactically
-- **Narrative combat**: Each exchange gets 1-2 sentences of LLM-generated prose
+- **Readable enemy intent**: Initiative, health, conditions, target and next authored attack are shown before you act
+- **NPC AI**: Enemies target vulnerable party members, cycle through their authored moves and may flee when badly wounded
+- **Grounded outcomes**: Hit, damage, resistance, wounds, defeat and loot come directly from the rules engine
 - **Wounds system**: Heavy hits (>50% HP damage) cause persistent wounds that need healing
 - **Death isn't the end**: Lose 25% gold, respawn weakened at the nearest safe location
+- **Persistent aftermath**: Finished battles remain part of the location and return you to contextual exploration choices
 
 ### World
 - **Director system**: Dynamically spawns NPCs, locations, and quests based on pacing and context
@@ -97,8 +99,8 @@ The result is a game that feels authored and alive, but is mechanically fair.
 - **Bounty system**: Crimes accumulate bounties; bounty hunters spawn on roads above 50
 
 ### Character
-- **5 races**: Human, Dwarf, Elf, Halfling, Half-Orc — each with racial bonuses
-- **4 classes**: Fighter, Wizard, Cleric, Rogue — each with unique features and spell access
+- **23 races** with distinct bonuses, sizes and traits
+- **12 classes** with class resources, abilities and spell access
 - **Multiclassing**: Up to 2 classes with ability prerequisites
 - **Spellcasting**: Full slot system with cantrip scaling, concentration, and arcane recovery
 - **14 status conditions**: From Blinded to Unconscious, each with mechanical effects
@@ -152,56 +154,32 @@ The result is a game that feels authored and alive, but is mechanically fair.
 │  world_sim   │  economy · crafting · affinity│               │
 ├──────────────┴──────────────────────────────┴───────────────┤
 │                      Storage Layer                           │
-│   database · 14 migrations · 19 repositories                 │
+│   database · versioned migrations · scoped repositories      │
 │   Three Ledgers: World State │ Event Ledger │ Canon Ledger   │
 ├─────────────────────────────────────────────────────────────┤
 │                       RAG Layer                              │
 │   ChromaDB vector_store · embeddings · retriever · indexer   │
 ├─────────────────────────────────────────────────────────────┤
 │                     Content (TOML)                            │
-│   33 files: races · classes · items · spells · regions ·     │
+│   races · classes · items · spells · 19 regions ·            │
 │   factions · encounters · quests · shops · stories           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### The Turn Loop
 
-Every player action flows through 7 steps:
+Simple commands bypass inference. Freeform proposals reference existing objects and actions; the engine authorizes and resolves their effects.
 
+```text
+Player input → Parse or typed local-model proposal
+             → Resolve on isolated SQLite state
+             → Validate effects and check concurrent changes
+             → Commit state + events + receipt atomically
+             → Display engine outcome / generate NPC dialogue
+             → Background event indexing
 ```
-Player Input
-    │
-    ▼
-┌─────────┐   Regex patterns (41) match first.
-│ NORMALIZE│   LLM fallback for ambiguous input.
-└────┬────┘
-     ▼
-┌─────────┐   ChromaDB retrieves relevant lore,
-│ RETRIEVE │   past events, and NPC memories.
-└────┬────┘
-     ▼
-┌──────────┐   Rules engine checks: can you cast
-│ CONSTRAIN│   that spell? Are you incapacitated?
-└────┬─────┘
-     ▼
-┌─────────┐   Game system resolves the action.
-│ PROPOSE │   Dice roll. Mechanics are authoritative.
-└────┬────┘
-     ▼
-┌─────────┐   Mutations validated: HP clamped,
-│ VALIDATE│   conditions checked, inventory updated.
-└────┬────┘
-     ▼
-┌─────────┐   Director evaluates pacing. Spawns
-│ DIRECTOR│   NPCs, locations, quests as needed.
-└────┬────┘
-     ▼
-┌─────────┐   LLM narrates the result. RAG context
-│ RENDER  │   feeds the prose. Rich renders to terminal.
-└────┬────┘
-     ▼
-  Display
-```
+
+Director work runs at selected story boundaries. Exact conversation memory works without vector embeddings. Reusing a request ID returns the stored result without repeating effects.
 
 ### Input Classification Pipeline
 
@@ -234,13 +212,19 @@ The input handler is the nervous system of the narrator. It decides **what** the
 
 ### Prerequisites
 - Python 3.11+
-- [Ollama](https://ollama.ai) running locally with `mistral` and `nomic-embed-text` models
+- An LLM provider — one of:
+  - A cloud API key (OpenAI or Anthropic), **or**
+  - [Ollama](https://ollama.ai) running locally (default: official Gemma 4 12B IT QAT Q4_0)
 
 ```bash
-# Pull the required models
-ollama pull mistral
+# Local option: pull models for narration and RAG embeddings
+ollama pull hf.co/google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0
 ollama pull nomic-embed-text
 ```
+
+RAG memory uses `nomic-embed-text` (Ollama) or `text-embedding-3-small` (OpenAI key).
+With an Anthropic-only setup, embeddings fall back to Ollama or an OpenAI key if
+available — otherwise the game still runs with RAG memory disabled (a notice is shown).
 
 ### Install
 
@@ -260,7 +244,10 @@ pip install -e ".[dev]"
 ### Play
 
 ```bash
-# Check that Ollama is running and models are available
+# Pick your LLM provider and model (writes config.toml + .env)
+text-rpg setup
+
+# Check that your provider and models are available
 text-rpg check
 
 # Start a new adventure
@@ -271,20 +258,27 @@ text-rpg play --save
 
 # List saved games
 text-rpg saves
+
+# Rebuild the GM's RAG memory from the events ledger
+# (runs automatically after switching embedding providers)
+text-rpg reindex
 ```
 
 ### Configuration
 
-Edit `config.toml` to customize:
+Run `text-rpg setup` for a guided model picker, or edit `config.toml` directly:
 
 ```toml
 [llm]
 provider = "ollama"
-model = "mistral"           # Any Ollama model
-temperature = 0.8           # Narrator creativity
+model = "hf.co/google/gemma-4-12B-it-qat-q4_0-gguf:Q4_0"
+num_ctx = 8192
+think = false
+
+[rag]
+# embedding_provider = "openai"  # Optional override: openai | ollama
 
 [game]
-difficulty = "normal"       # easy, normal, hard
 starting_region = "verdant_reach"
 starting_location = "thornfield_village"
 
@@ -294,6 +288,10 @@ show_dice_rolls = true      # See the d20 in action
 show_mechanics = true       # Show DC checks and modifiers
 ```
 
+Local Ollama gameplay needs no API key. Optional cloud-provider keys live in `.env`.
+
+See the [local-first implementation status](docs/local-first-implementation-status-2026-09-13.md) for memory, transaction guarantees, measured model latency, migration behavior and remaining limits.
+
 ---
 
 ## Commands
@@ -301,11 +299,41 @@ show_mechanics = true       # Show DC checks and modifiers
 ### Exploration
 | Command | Action |
 |---------|--------|
+| `options` / `what can I do here?` | Show useful actions backed by the current saved scene |
 | `go north` / `n` | Move in a direction |
-| `look` / `examine chest` | Observe surroundings or objects |
-| `search` / `investigate` | Search the area |
+| `look` / `examine chest` | Observe surroundings or a visible feature |
+| `search` / `search behind tree` | Search the area or one concrete feature; repeat attempts are bounded |
+| `pick up <item>` / `pick up items` | Collect one or all items actually shown on the ground |
+| `repair <feature>` | Repair a damaged feature with an appropriate artisan tool and check |
+| `solve <approach>` / `answer <response>` / `disarm <method>` / `pick lock` | Attempt a discovered obstacle; failures and completion persist |
+| `danger` / `hunt` | Find known combat zones or deliberately seek a hostile encounter here |
 | `talk to merchant` | Start a conversation |
 | `rest` / `rest long` | Short or long rest |
+
+Plain-language physical actions are also supported. You can sit on a ledge,
+hide behind cover, mark or damage an eligible feature, build or clean something,
+or leave a mess on the road. The engine resolves the action against visible
+objects and persists lasting changes. It does not invent free treasure, routes,
+people, or rewards.
+
+### Campaign and continuity
+| Command | Action |
+|---------|--------|
+| `leads` / `campaign` | Show the current regional chapter, routes, contacts, evidence and choices |
+| `inspect <record>` | Investigate a listed record at its location |
+| `resolve expose` / `resolve secure` | Decide what to do with two independent records at the listed filing place |
+| `personal goal` / `personal goal justice` | View or choose a personal goal |
+| `history` | Review consequential events, including deaths, revivals and rebuilding |
+| `revival options` | See established revival services and recorded dead at your location |
+| `revival <person> with <caster>` | Review a ritual's price, time, roll and failure consequences without spending |
+| `confirm revival` / `cancel revival` | Accept or decline the current offer; confirmed failures still spend resources |
+
+Every authored region receives a playable two-chapter investigation assembled
+from reachable real locations and local contacts. Iron Coast and Ashen Highlands
+have bespoke campaigns; other regions use the grounded regional scenario compiler.
+Motives and lead order vary by save and remain fixed once introduced. See the
+[implementation notes](docs/campaign-continuity-implementation-2026-09-27.md)
+for the exact current scope.
 
 ### Combat
 | Command | Action |
@@ -315,6 +343,13 @@ show_mechanics = true       # Show DC checks and modifiers
 | `3` | Use a combat item |
 | `4` / `flee` | Attempt to flee |
 | `5` / `dodge` | Take the Dodge action |
+| `grapple <target>` | Contest Athletics to hold a target in place |
+
+Combat panels show initiative order, enemy health, conditions, and each enemy's
+next intended move. Creatures with several authored attacks cycle through them;
+the displayed intent, damage type, resistance handling, and resolved attack all
+refer to the same move. Victory, defeat, and escape return to contextual scene
+options, while completed battles leave persistent signs at their location.
 
 ### Inventory & Equipment
 | Command | Action |
@@ -351,7 +386,7 @@ show_mechanics = true       # Show DC checks and modifiers
 
 ## Testing
 
-The test suite covers 724 parametrized tests across the entire codebase:
+The test suite covers 1,981 parametrized tests across the entire codebase:
 
 ```bash
 # Run all tests
@@ -367,16 +402,7 @@ pytest tests/test_engine/ -v          # Validators & turn loop
 
 ### Test Coverage
 
-| Module | Tests | What's Covered |
-|--------|------:|---------------|
-| `mechanics/` | ~280 | All 15 mechanics modules: dice, combat, conditions, leveling, reputation, affinity, economy, crafting, death, wounds, spellcasting, multiclassing, survival, world clock, ability scores |
-| `cli/` | ~120 | All 41 regex patterns, meta commands, movement, combat choices, conversation handling |
-| `llm/` | ~51 | Output parsing (action classification, narrative hooks, dialogue mood, JSON extraction), context packing, token budgeting |
-| `engine/` | ~18 | Validators (HP clamping, action validation), turn loop static methods |
-| `storage/` | ~14 | Database migrations, schema integrity, commit/rollback, snapshot CRUD |
-| `utils/` | ~15 | `safe_json()` and `safe_props()` edge cases |
-
-All tests run in **<1 second** with zero external dependencies — no LLM, no database server, no network calls.
+Tests cover game mechanics, input handling, schema validation, native Ollama requests, transactions, save isolation, timeline memory, snapshot restoration and authored interactions. The full suite passed 1,981 tests on the development machine. Unit tests use local temporary SQLite databases and model stubs; the separate Ollama acceptance script exercises the actual model. See the [verification report](docs/local-first-implementation-status-2026-09-13.md) for measured latency and evaluation limits.
 
 ---
 
@@ -422,7 +448,7 @@ Create a new folder under `content/regions/` with the same TOML structure as `ve
 | Models | Pydantic v2 |
 | Templates | Jinja2 |
 | CLI | Typer + Rich |
-| Tests | pytest (724 tests) |
+| Tests | pytest (1,981 tests) |
 
 ---
 
@@ -442,9 +468,9 @@ candlelight-quest/
 │   ├── mechanics/                 # 27 pure-function game math modules
 │   ├── models/                    # Pydantic data models
 │   ├── rag/                       # ChromaDB + embeddings + retrieval
-│   ├── storage/                   # SQLite DB, 14 migrations, 19 repos
+│   ├── storage/                   # SQLite DB, versioned migrations and repositories
 │   └── systems/                   # 12 pluggable game systems
-└── tests/                         # 724 parametrized tests
+└── tests/                         # 1,981 parametrized tests
     ├── conftest.py                # Shared fixtures
     ├── test_mechanics/            # 15 test modules
     ├── test_cli/                  # Input handler tests
@@ -465,7 +491,7 @@ candlelight-quest/
 
 **The Director, not the Dungeon Master.** The Director system watches pacing and spawns content when the world needs it — a new NPC when things are quiet, a bounty hunter when tension is high. It doesn't railroad; it populates.
 
-**Memory makes the narrator.** RAG retrieval means the LLM knows that you killed a merchant 30 turns ago, even when the context window has long forgotten. The narrator references your past because it actually remembers it.
+**Memory survives reload.** SQLite stores exact conversations and engine-backed commitments, with save and timeline boundaries. Relevant history is supplied to NPC dialogue; mechanical outcomes come directly from the engine.
 
 ---
 
@@ -494,3 +520,35 @@ candlelight-quest/
 <p align="center">
   <sub>Built with obsessive attention to game feel by a human and an AI, one dice roll at a time.</sub>
 </p>
+
+### Exploring scene features and seeking combat
+
+`look` shows visible scene features and danger notices. `inspect glassy wall`
+examines a feature without a roll; `search behind glassy wall` attempts a
+persistent, targeted investigation. Each feature tracks its own search attempt:
+renaming the command or reloading does not grant another roll at the same level.
+Some authored findings reveal collectible catalog items, with existing weights
+and prices, exactly once. Not every search yields treasure.
+
+`danger` lists hostile encounter locations in the loaded world. Travel using
+normal exits, then use `hunt` to spend ten minutes seeking an encounter. This
+respects encounter cooldowns and does not stack new foes on existing hostiles.
+Ordinary actions such as `I sing` or `I poop on the road` can resolve without a
+check. They spend time; physical traces and the event record persist. They do
+not manufacture loot, magical effects, or successful persuasion.
+
+All 421 authored locations compile into three to six persistent scene features.
+Features inherit useful actions from what they are: trees can provide cover and
+be climbed, signs can be read, water can be waded, and doors can be knocked on.
+Inhabited locations receive a modest persistent supporting population who can
+discuss supplied public facts but cannot invent quests or rewards. Time of day, NPC schedules,
+witness reactions, danger, searches, damage, discoveries, and player traces are
+read from saved state when the scene is shown again.
+
+Unlisted actions still pass through the bounded creative adjudicator. The local
+model evaluates plausibility against the character, scene, equipment and recent
+events; the engine sets the DC, rolls the check, and records the result. Successful
+physical work such as digging or arranging can leave a lasting location change.
+The engine refuses invented targets, items, routes, creatures and magical effects.
+Clear physical commands bypass intent inference, and no second prose call runs
+after the roll, keeping the common local-model path responsive.

@@ -32,10 +32,44 @@ class RestSystem(GameSystem):
         return action.action_type.lower() == "rest"
 
     def resolve(self, action: Action, context: GameContext) -> ActionResult:
+        if context.combat_state and context.combat_state.get('is_active'):
+            return ActionResult(action_id=action.id, outcome_description='You cannot rest during combat.')
+        if any(e.get('is_alive', True) and e.get('is_hostile') for e in context.entities):
+            return ActionResult(action_id=action.id, outcome_description='You cannot rest with a hostile creature present. Find shelter or deal with the threat first.')
+        if context.character.get('hp_current', 0) <= 0:
+            return ActionResult(action_id=action.id, outcome_description='You need at least 1 HP to begin a rest.')
         rest_type = action.parameters.get("rest_type", "short")
         if rest_type == "long":
+            last = self._last_rest(context.game_id, 'long')
+            earliest = last.get('completed_at', -960) + 960
+            if last and context.world_time < earliest:
+                wait = earliest - context.world_time
+                return ActionResult(action_id=action.id, outcome_description=
+                    f'You cannot benefit from another long rest yet. Wait {wait // 60}h {wait % 60}m before starting one. A long rest takes 8 hours.')
             return self._long_rest(action, context)
         return self._short_rest(action, context)
+
+    def _last_rest(self, game_id, kind):
+        from text_rpg.storage.database import Database
+        db = getattr(self._repos.get('save_game'), 'db', None)
+        if not isinstance(db, Database):
+            return {}
+        key = 'arcane_recovery' if kind == 'arcane_recovery' else 'rest_type'
+        value = 1 if kind == 'arcane_recovery' else kind
+        with db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT data FROM world_history WHERE game_id=? AND event_type='REST' "
+                "AND json_extract(data,?)=? ORDER BY world_time DESC,rowid DESC LIMIT 1",
+                (game_id, '$.' + key, value)).fetchone()
+        return safe_json(row['data'], {}) if row else {}
+
+    @staticmethod
+    def _rest_event(context, kind, description, *, arcane_recovery=False):
+        duration = 480 if kind == 'long' else 60
+        return {'event_type': 'REST', 'description': description,
+                'mechanical_details': {'rest_type': kind, 'duration_minutes': duration,
+                                       'completed_at': context.world_time + duration,
+                                       'arcane_recovery': arcane_recovery}}
 
     def get_available_actions(self, context: GameContext) -> list[dict]:
         if context.combat_state and context.combat_state.get("is_active"):
@@ -51,19 +85,12 @@ class RestSystem(GameSystem):
         con_mod = modifier(scores.get("constitution", 10))
         hit_dice_remaining = char.get("hit_dice_remaining", 0)
 
-        if hit_dice_remaining <= 0:
-            return ActionResult(
-                action_id=action.id, success=True,
-                outcome_description="You rest briefly but have no hit dice to spend.",
-                events=[{"event_type": "REST", "description": "Took a short rest (no hit dice)."}],
-            )
-
         cls = char.get("char_class", "fighter")
         if isinstance(cls, str):
             cls = cls.lower()
         hit_die = HIT_DICE.get(cls, "1d8")
-        result = roll(hit_die)
-        healed = max(1, result.total + con_mod)
+        result = roll(hit_die) if hit_dice_remaining > 0 else None
+        healed = max(1, result.total + con_mod) if result else 0
 
         old_hp = char.get("hp_current", 0)
         max_hp = char.get("hp_max", old_hp)
@@ -72,11 +99,15 @@ class RestSystem(GameSystem):
         mutations = [
             StateMutation(target_type="character", target_id=char["id"], field="hp_current", old_value=old_hp, new_value=new_hp),
             StateMutation(target_type="character", target_id=char["id"], field="hit_dice_remaining", old_value=hit_dice_remaining, new_value=hit_dice_remaining - 1),
-        ]
-        desc = f"You take a short rest and recover {new_hp - old_hp} hit points."
+        ] if result else []
+        desc = f"You take a one-hour short rest and recover {new_hp - old_hp} hit points."
+        used_recovery = False
 
         # Wizard Arcane Recovery: recover spell slot levels = ceil(level/2)
-        if cls == "wizard" and char.get("spellcasting_ability"):
+        last_recovery = self._last_rest(context.game_id, 'arcane_recovery') if cls == 'wizard' else {}
+        last_long = self._last_rest(context.game_id, 'long') if cls == 'wizard' else {}
+        recovery_available = not last_recovery or last_long.get('completed_at', -1) > last_recovery.get('completed_at', 0)
+        if cls == "wizard" and char.get("spellcasting_ability") and recovery_available:
             slots_remaining = safe_json(char.get("spell_slots_remaining"), {})
             slots_max = safe_json(char.get("spell_slots_max"), {})
 
@@ -84,6 +115,8 @@ class RestSystem(GameSystem):
             new_slots = {str(k): v for k, v in slots_remaining.items()}
             recovered_text = []
             for sl in sorted(int(k) for k in slots_max):
+                if sl >= 6:
+                    continue
                 if recovery_budget <= 0:
                     break
                 current = int(new_slots.get(str(sl), 0))
@@ -97,6 +130,7 @@ class RestSystem(GameSystem):
                         recovered_text.append(f"{recover_count} level-{sl}")
 
             if recovered_text:
+                used_recovery = True
                 mutations.append(StateMutation(
                     target_type="character", target_id=char["id"],
                     field="spell_slots_remaining",
@@ -106,7 +140,7 @@ class RestSystem(GameSystem):
                 desc += f" Arcane Recovery: restored {', '.join(recovered_text)} spell slot(s)."
 
         actual_healed = new_hp - old_hp
-        events = [{"event_type": "REST", "description": desc}]
+        events = [self._rest_event(context, 'short', desc, arcane_recovery=used_recovery)]
         if actual_healed > 0:
             events.append({
                 "event_type": "HEAL",
@@ -121,7 +155,7 @@ class RestSystem(GameSystem):
             dice_rolls=[DiceRoll(
                 dice_expression=hit_die, rolls=result.individual_rolls,
                 modifier=con_mod, total=healed, purpose="hit_dice_healing",
-            )],
+            )] if result else [],
             state_mutations=mutations,
             events=events,
         )
@@ -139,7 +173,7 @@ class RestSystem(GameSystem):
             StateMutation(target_type="character", target_id=char["id"], field="hit_dice_remaining", old_value=old_dice, new_value=old_dice + restored_dice),
             StateMutation(target_type="character", target_id=char["id"], field="conditions", old_value=None, new_value=[]),
         ]
-        desc = f"You take a long rest. All hit points restored. {restored_dice} hit dice recovered."
+        desc = f"You take an eight-hour long rest. All hit points restored. {restored_dice} hit dice recovered."
 
         # Restore all spell slots and clear concentration
         if char.get("spellcasting_ability"):
@@ -198,7 +232,7 @@ class RestSystem(GameSystem):
                 pass
 
         hp_healed = max_hp - old_hp
-        events = [{"event_type": "REST", "description": desc}]
+        events = [self._rest_event(context, 'long', desc)]
         if hp_healed > 0:
             events.append({
                 "event_type": "HEAL",

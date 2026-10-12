@@ -16,12 +16,17 @@ Quest Hook: {{ quest_hook }}
 ## Recent Events
 {{ recent_events_summary }}
 
+## Valid Targets (objectives MUST use these exact ids — anything else is discarded)
+Locations (for travel): {{ valid_locations | default("none known") }}
+NPCs (for talk): {{ valid_npcs | default("none known") }}
+Creature types (for kill): {{ valid_entity_types | default("none known") }}
+Items (for interact/fetch): {{ valid_items | default("none known") }}
+
 Create a quest that:
 - Naturally emerges from the NPC's motivation and quest hook
-- Has clear objectives (some negotiable, some fixed)
-- Is appropriate for the player's level
-- Rewards the player fairly
-- Has a compelling narrative hook
+- Has 2-4 clear objectives whose targets come ONLY from the Valid Targets lists above
+- Usually ends with a "talk" objective targeting the quest giver (the turn-in)
+- Is appropriate for the player's level and rewards the player fairly
 
 Respond in JSON only:
 {
@@ -30,9 +35,9 @@ Respond in JSON only:
   "objectives": [
     {
       "description": "What the player must do",
-      "target_type": "kill, fetch, travel, deliver, investigate, or talk",
-      "target_id": "target name or null",
-      "required_count": 1,
+      "objective_type": "kill | travel | talk | interact",
+      "target": "an exact id from the matching Valid Targets list",
+      "target_count": 1,
       "negotiable": true or false
     }
   ],

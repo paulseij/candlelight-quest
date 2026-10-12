@@ -35,6 +35,7 @@ late_night = "silverleaf_hall"
 [npcs.properties]
 preferred_gifts = ["moonpetal", "arcane_dust", "enchanted_thread"]
 disliked_gifts = ["iron_ingot", "beast_hide"]
+quest_hook = "An ancient darkness is creeping through the deep Mistwood, corrupting the forest spirits and withering the great trees"
 
 [[npcs.attacks]]
 name = "Moonbeam"
@@ -164,6 +165,7 @@ late_night = "ranger_outpost"
 [npcs.properties]
 preferred_gifts = ["rations", "healing_potion"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "Goblin raiding parties are using the fog trails to ambush travelers — we need to find their hidden camp"
 
 [[npcs.attacks]]
 name = "Twin Shortswords"

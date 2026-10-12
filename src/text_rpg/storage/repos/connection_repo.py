@@ -21,7 +21,7 @@ class ConnectionRepo:
         with self.db.get_connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM location_connections "
-                "WHERE game_id = ? AND source_location_id = ?",
+                "WHERE game_id = ? AND source_location_id = ? ORDER BY rowid",
                 (game_id, location_id),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -59,12 +59,12 @@ class ConnectionRepo:
         description: str = "",
         is_locked: bool = False,
     ) -> None:
-        """Add a connection, skipping if the source+direction already exists."""
+        """Add a path, skipping only an identical source, direction and destination."""
         with self.db.get_connection() as conn:
             existing = conn.execute(
                 "SELECT 1 FROM location_connections "
-                "WHERE game_id = ? AND source_location_id = ? AND direction = ?",
-                (game_id, source_id, direction),
+                "WHERE game_id = ? AND source_location_id = ? AND direction = ? AND target_location_id = ?",
+                (game_id, source_id, direction, target_id),
             ).fetchone()
             if existing:
                 return

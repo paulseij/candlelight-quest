@@ -43,7 +43,7 @@ class ContextPacker:
             sections.append(f"## Combat\n{self._format_combat(combat_state)}")
 
         if recent_events:
-            events_text = "\n".join(f"- {e.get('description', '')}" for e in recent_events[-5:])
+            events_text = "\n".join(f"- {e.get('description', '')}" for e in reversed(recent_events[:5]))
             sections.append(f"## Recent Events\n{events_text}")
 
         if rag_context:
@@ -53,6 +53,9 @@ class ContextPacker:
             if rag_context.get("past_events"):
                 past_text = "\n".join(f"- {e}" for e in rag_context["past_events"][:3])
                 sections.append(f"## Relevant History\n{past_text}")
+            if rag_context.get("srd_reference"):
+                srd_text = "\n".join(f"- {s}" for s in rag_context["srd_reference"][:2])
+                sections.append(f"## Reference Flavor (background color only)\n{srd_text}")
 
         if narrator_hints:
             hints_text = "\n".join(f"- {h}" for h in narrator_hints[:3])

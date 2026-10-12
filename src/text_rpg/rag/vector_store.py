@@ -15,20 +15,31 @@ class VectorStore:
         self,
         persist_dir: str = "data/chromadb",
         collection_prefix: str = "text_rpg",
+        embedding_tag: str = "",
     ) -> None:
         self.persist_dir = persist_dir
         self.collection_prefix = collection_prefix
+        # Collections are namespaced per embedding model so switching providers
+        # (with different vector dimensions) never corrupts or breaks the store.
+        self.embedding_tag = embedding_tag.replace(":", "_").replace("/", "_")
         Path(persist_dir).mkdir(parents=True, exist_ok=True)
         self.client = chromadb.PersistentClient(path=persist_dir)
         self._collections: dict[str, chromadb.Collection] = {}
 
+    def _full_name(self, name: str) -> str:
+        base = f"{self.collection_prefix}_{name}"
+        return f"{base}__{self.embedding_tag}" if self.embedding_tag else base
+
     def get_collection(self, name: str) -> chromadb.Collection:
         """Return (or lazily create) a namespaced ChromaDB collection."""
-        full_name = f"{self.collection_prefix}_{name}"
+        full_name = self._full_name(name)
         if full_name not in self._collections:
+            metadata: dict[str, Any] = {"hnsw:space": "cosine"}
+            if self.embedding_tag:
+                metadata["embedding_model"] = self.embedding_tag
             self._collections[full_name] = self.client.get_or_create_collection(
                 name=full_name,
-                metadata={"hnsw:space": "cosine"},
+                metadata=metadata,
             )
         return self._collections[full_name]
 
@@ -49,7 +60,7 @@ class VectorStore:
         }
         if embeddings:
             kwargs["embeddings"] = embeddings
-        collection.add(**kwargs)
+        collection.upsert(**kwargs)
 
     def query(
         self,
@@ -72,9 +83,14 @@ class VectorStore:
         """Return the number of documents in a collection."""
         return self.get_collection(collection_name).count()
 
+    def has_any(self, collection_name: str, where: dict[str, Any]) -> bool:
+        """Return True if any document matches the metadata filter."""
+        result = self.get_collection(collection_name).get(where=where, limit=1)
+        return bool(result.get("ids"))
+
     def delete_collection(self, collection_name: str) -> None:
         """Delete a collection by its short name."""
-        full_name = f"{self.collection_prefix}_{collection_name}"
+        full_name = self._full_name(collection_name)
         try:
             self.client.delete_collection(full_name)
             self._collections.pop(full_name, None)

@@ -37,6 +37,7 @@ late_night = "silverpeak_throne"
 [npcs.properties]
 preferred_gifts = ["soul_gem", "healing_potion"]
 disliked_gifts = ["nightshade", "poison_vial"]
+quest_hook = "Something has broken through the sealed tunnels deep below — miners are hearing sounds that shouldn't be there"
 
 [[npcs.attacks]]
 name = "Ancient Hammer"

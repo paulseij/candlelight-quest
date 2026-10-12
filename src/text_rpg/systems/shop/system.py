@@ -59,7 +59,20 @@ class ShopSystem(GameSystem):
         shop_repo = repos.get("shop")
         if not shop_repo:
             return []
-        return shop_repo.get_shop_by_location(context.game_id, context.location.get("id", ""))
+        shops = shop_repo.get_shop_by_location(context.game_id, context.location.get("id", ""))
+        from text_rpg.storage.database import Database
+        condition = None
+        if isinstance(getattr(repos.get('save_game'), 'db', None), Database):
+            from text_rpg.engine.continuity import Continuity
+            condition = Continuity(repos).location_condition(context.game_id, context.location.get('id', ''))
+        if condition and condition['condition'] == 'destroyed':
+            return []
+        entity_repo = repos.get('entity')
+        if not entity_repo:
+            return shops
+        return [shop for shop in shops if not shop.get('owner_entity_id') or
+                ((owner := entity_repo.get(shop['owner_entity_id'])) and owner.get('is_alive', False)
+                 and owner.get('location_id') == shop.get('location_id'))]
 
     def _get_rep_multiplier(self, context: GameContext, shop: dict) -> float:
         """Get the reputation-based price multiplier for a shop."""
@@ -228,7 +241,8 @@ class ShopSystem(GameSystem):
 
         items = safe_json(inv.get("items"), [])
 
-        all_items = load_all_items()
+        from text_rpg.systems.item_catalog import get_item_catalog
+        all_items = get_item_catalog(self._repos, context.game_id, context.character.get("id"))
         found_entry = None
         found_item_data = None
 
