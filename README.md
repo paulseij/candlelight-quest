@@ -145,7 +145,7 @@ The result is a game that feels authored and alive, but is mechanically fair.
 │  exploration │  schemas · cooldowns         │  context_pack │
 │  social      │                              │  output_parse │
 │  inventory   │                              │  token_budget │
-│  crafting    ├──────────────────────────────┤  11 templates │
+│  crafting    ├──────────────────────────────┤  prompts      │
 │  shop        │      Mechanics Layer          │               │
 │  companion   │  dice · combat_math          │               │
 │  housing     │  conditions · leveling       │               │
@@ -230,7 +230,7 @@ available — otherwise the game still runs with RAG memory disabled (a notice i
 
 ```bash
 # Clone the repository
-git clone https://github.com/Taffesbroodje/candlelight-quest.git
+git clone https://github.com/paulseij/candlelight-quest.git
 cd candlelight-quest
 
 # Create virtual environment
@@ -382,6 +382,38 @@ options, while completed battles leave persistent signs at their location.
 | `save` | Save game |
 | `quit` / `q` | Exit |
 
+### Exploring scene features and seeking combat
+
+`look` shows visible scene features and danger notices. `inspect glassy wall`
+examines a feature without a roll; `search behind glassy wall` attempts a
+persistent, targeted investigation. Each feature tracks its own search attempt:
+renaming the command or reloading does not grant another roll at the same level.
+Some authored findings reveal collectible catalog items, with existing weights
+and prices, exactly once. Not every search yields treasure.
+
+`danger` lists hostile encounter locations in the loaded world. Travel using
+normal exits, then use `hunt` to spend ten minutes seeking an encounter. This
+respects encounter cooldowns and does not stack new foes on existing hostiles.
+Ordinary actions such as `I sing` or `I poop on the road` can resolve without a
+check. They spend time; physical traces and the event record persist. They do
+not manufacture loot, magical effects, or successful persuasion.
+
+All 421 authored locations compile into three to six persistent scene features.
+Features inherit useful actions from what they are: trees can provide cover and
+be climbed, signs can be read, water can be waded, and doors can be knocked on.
+Inhabited locations receive a modest persistent supporting population who can
+discuss supplied public facts but cannot invent quests or rewards. Time of day, NPC schedules,
+witness reactions, danger, searches, damage, discoveries, and player traces are
+read from saved state when the scene is shown again.
+
+Unlisted actions still pass through the bounded creative adjudicator. The local
+model evaluates plausibility against the character, scene, equipment and recent
+events; the engine sets the DC, rolls the check, and records the result. Successful
+physical work such as digging or arranging can leave a lasting location change.
+The engine refuses invented targets, items, routes, creatures and magical effects.
+Clear physical commands bypass intent inference, and no second prose call runs
+after the roll, keeping the common local-model path responsive.
+
 ---
 
 ## Testing
@@ -406,20 +438,36 @@ Tests cover game mechanics, input handling, schema validation, native Ollama req
 
 ---
 
+## Development
+
+| Branch | Purpose |
+|--------|---------|
+| `main` | Stable, playable releases |
+| `develop` | Integration branch: all work lands here first through pull requests |
+| `kami/<id>-<topic>` | Work branches opened by Kami, Paul's local AI assistant, one per job |
+
+New work starts from `develop` and comes back as a pull request with the full
+test suite passing. `develop` is merged into `main` when a set of changes has
+been played and checked. Tests in `tests/` are never weakened to make a change pass.
+
+---
+
 ## Content
 
 All game content lives in TOML files — add a new race, item, or quest without touching any code:
 
 ```
-content/
-├── classes/          # Fighter, Wizard, Cleric, Rogue
+content/                      # 209 TOML files
+├── classes/          # 12 classes, barbarian to wizard
 │   └── fighter.toml  # HP dice, proficiencies, features by level
-├── races/            # Human, Dwarf, Elf, Halfling, Half-Orc
+├── races/            # 23 races with Small/Medium/Large sizes
 │   └── dwarf.toml    # Ability bonuses, speed, traits
-├── items/            # 6 files: weapons, armor, general, crafting, scrolls, enchanted
-├── spells/           # Full spell list with levels, components, effects
-├── factions/         # 4 factions with goals, allies, enemies
-├── regions/
+├── origins/          # Character origins (27 files)
+├── items/            # 13 files: weapons, armor, general, crafting, scrolls, enchanted, ...
+├── spells/           # 12 files with levels, components, effects
+├── factions/         # Factions with goals, allies, enemies
+├── guilds/           # Guilds and their ranks
+├── regions/          # 19 regions: Verdant Reach, Frostmere, Iron Coast, ...
 │   └── verdant_reach/
 │       ├── region.toml      # Climate, level range, description
 │       ├── locations.toml   # Villages, dungeons, wilderness
@@ -427,7 +475,7 @@ content/
 │       ├── encounters.toml  # Combat and puzzle encounters
 │       ├── quests.toml      # Quest chains and objectives
 │       └── shops.toml       # Merchants and their inventories
-└── stories/          # 8 narrative seed files for the Director system
+└── stories/          # 9 narrative seed files for the Director system
 ```
 
 ### Adding a New Region
@@ -444,7 +492,7 @@ Create a new folder under `content/regions/` with the same TOML structure as `ve
 | LLM | Ollama via LiteLLM |
 | Embeddings | nomic-embed-text |
 | Vector Store | ChromaDB |
-| Database | SQLite (14 migrations) |
+| Database | SQLite (30 migrations) |
 | Models | Pydantic v2 |
 | Templates | Jinja2 |
 | CLI | Typer + Rich |
@@ -462,17 +510,20 @@ candlelight-quest/
 │   ├── app.py                     # Main GameApp bootstrap
 │   ├── utils.py                   # safe_json, safe_props
 │   ├── cli/                       # Terminal UI (Rich + Typer)
-│   ├── content/                   # 33 TOML data files
+│   ├── content/                   # 209 TOML data files + loaders
 │   ├── engine/                    # Turn loop, dispatcher, validators
-│   ├── llm/                       # LLM provider, parser, 11 templates
-│   ├── mechanics/                 # 27 pure-function game math modules
+│   ├── llm/                       # Ollama/LiteLLM providers, parser, prompts
+│   ├── mechanics/                 # 37 pure-function game math modules
 │   ├── models/                    # Pydantic data models
 │   ├── rag/                       # ChromaDB + embeddings + retrieval
-│   ├── storage/                   # SQLite DB, versioned migrations and repositories
-│   └── systems/                   # 12 pluggable game systems
+│   ├── storage/                   # SQLite DB, 30 versioned migrations, repositories
+│   └── systems/                   # 15 pluggable game systems
+├── docs/                          # Design notes and local-model acceptance runs
 └── tests/                         # 1,981 parametrized tests
     ├── conftest.py                # Shared fixtures
-    ├── test_mechanics/            # 15 test modules
+    ├── test_mechanics/            # Pure game math
+    ├── test_content/              # Every TOML file loads and validates
+    ├── test_systems/              # Game systems
     ├── test_cli/                  # Input handler tests
     ├── test_llm/                  # Parser + packer + budget tests
     ├── test_engine/               # Validator + turn loop tests
@@ -520,35 +571,3 @@ candlelight-quest/
 <p align="center">
   <sub>Built with obsessive attention to game feel by a human and an AI, one dice roll at a time.</sub>
 </p>
-
-### Exploring scene features and seeking combat
-
-`look` shows visible scene features and danger notices. `inspect glassy wall`
-examines a feature without a roll; `search behind glassy wall` attempts a
-persistent, targeted investigation. Each feature tracks its own search attempt:
-renaming the command or reloading does not grant another roll at the same level.
-Some authored findings reveal collectible catalog items, with existing weights
-and prices, exactly once. Not every search yields treasure.
-
-`danger` lists hostile encounter locations in the loaded world. Travel using
-normal exits, then use `hunt` to spend ten minutes seeking an encounter. This
-respects encounter cooldowns and does not stack new foes on existing hostiles.
-Ordinary actions such as `I sing` or `I poop on the road` can resolve without a
-check. They spend time; physical traces and the event record persist. They do
-not manufacture loot, magical effects, or successful persuasion.
-
-All 421 authored locations compile into three to six persistent scene features.
-Features inherit useful actions from what they are: trees can provide cover and
-be climbed, signs can be read, water can be waded, and doors can be knocked on.
-Inhabited locations receive a modest persistent supporting population who can
-discuss supplied public facts but cannot invent quests or rewards. Time of day, NPC schedules,
-witness reactions, danger, searches, damage, discoveries, and player traces are
-read from saved state when the scene is shown again.
-
-Unlisted actions still pass through the bounded creative adjudicator. The local
-model evaluates plausibility against the character, scene, equipment and recent
-events; the engine sets the DC, rolls the check, and records the result. Successful
-physical work such as digging or arranging can leave a lasting location change.
-The engine refuses invented targets, items, routes, creatures and magical effects.
-Clear physical commands bypass intent inference, and no second prose call runs
-after the roll, keeping the common local-model path responsive.
