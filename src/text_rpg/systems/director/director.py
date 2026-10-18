@@ -1357,6 +1357,11 @@ class Director:
                                         "hook", ["hook"], [quest_id],
                                     )
                                 events.append(quest_event)
+                            else:
+                                # No hook quest generated — undo the active story save
+                                repos["world_state"].complete_story(
+                                    context.game_id, selected["id"], "failed",
+                                )
 
                         self._last_generation["story"] = context.turn_number
 
